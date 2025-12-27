@@ -3,27 +3,39 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"turbodriver/internal/auth"
 	"turbodriver/internal/dispatch"
+	"turbodriver/internal/storage"
 )
 
 // AttachRoutes wires HTTP routes to handlers.
-func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub) {
-	handler := &Handler{store: store, hub: hub}
+func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration) {
+	authCfg := newAuthConfig(authStore, identityDB, defaultTTL)
+	handler := &Handler{store: store, hub: hub, auth: authCfg}
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
 
-	r.Post("/api/drivers/{driverID}/location", handler.UpdateDriverLocation)
-	r.Post("/api/rides", handler.RequestRide)
-	r.Get("/api/rides/{rideID}", handler.GetRide)
-	r.Post("/api/rides/{rideID}/accept", handler.AcceptRide)
-	r.Post("/api/rides/{rideID}/cancel", handler.CancelRide)
-	r.Post("/api/rides/{rideID}/complete", handler.CompleteRide)
+	r.Group(func(pr chi.Router) {
+		pr.Use(authCfg.middleware)
+		pr.Post("/api/drivers/{driverID}/location", handler.UpdateDriverLocation)
+		pr.Post("/api/rides", handler.RequestRide)
+		pr.Get("/api/rides/{rideID}", handler.GetRide)
+		pr.Post("/api/rides/{rideID}/accept", handler.AcceptRide)
+		pr.Post("/api/rides/{rideID}/cancel", handler.CancelRide)
+		pr.Post("/api/rides/{rideID}/complete", handler.CompleteRide)
+	})
+
+	r.Group(func(pr chi.Router) {
+		pr.Use(authCfg.middleware)
+		pr.Post("/api/auth/register", handler.RegisterIdentity)
+	})
 
 	r.Get("/ws/rides/{rideID}", handler.RideWebsocket)
 }

@@ -221,6 +221,12 @@ docker-compose up --build
 The API listens on `http://localhost:8080`.
 - Persistence: API uses `DATABASE_URL` (set in Compose to Postgres) and auto-creates minimal `drivers`/`rides` tables. If `DATABASE_URL` is unset or DB is unavailable, it falls back to in-memory state.
 - Geo: API uses `REDIS_URL` (set in Compose) for GEO-based nearest-driver search; falls back to in-memory if unavailable.
+- Auth: In-memory token issuance (dev mode). Set `AUTH_MODE=memory` (default in docker-compose).
+  - `POST /api/auth/register` with body `{"role":"driver"|"passenger"|"admin"}` issues an ID and token.
+  - All `/api/*` endpoints require `Authorization: Bearer <token>` once auth is enabled; `/ws/rides/{rideID}` accepts header or `?token=` query param.
+  - Role enforcement: drivers may send locations/accept/complete; passengers may request rides/cancel; admins bypass checks and can register new identities.
+- Identity persistence: when Postgres is available, identities are stored in `identities` table and read alongside in-memory cache (auth tokens survive restarts).
+  - Tokens default to 30d TTL (`AUTH_TTL`, e.g. `24h`), stored in DB with expiry and skipped if expired when seeding the cache.
 
 ### HTTP & WebSocket Surface (MVP)
 
@@ -232,6 +238,7 @@ The API listens on `http://localhost:8080`.
 - `POST /api/rides/{rideID}/cancel` – cancel ride (passenger/admin flow). Frees driver.
 - `POST /api/rides/{rideID}/complete` – mark ride complete. Frees driver.
 - `GET /ws/rides/{rideID}` – subscribe to ride + driver updates (server pushes JSON frames).
+  - Acceptance window: ~15 seconds. If a ride stays `assigned` without acceptance, it frees the driver and tries to reassign another nearby driver; if none are found, the ride reverts to `requested`.
 
 ### Matching Rules (current)
 

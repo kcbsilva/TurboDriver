@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"turbodriver/internal/api"
+	"turbodriver/internal/auth"
 	"turbodriver/internal/dispatch"
 	"turbodriver/internal/geo"
 	"turbodriver/internal/storage"
@@ -20,7 +21,7 @@ import (
 func main() {
 	addr := envOrDefault("HTTP_ADDR", ":8080")
 
-	store := initStore()
+	store, authStore, identityDB, authTTL := initStore()
 	hub := dispatch.NewHub()
 	go hub.Run()
 
@@ -33,7 +34,7 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	api.AttachRoutes(r, store, hub)
+	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL)
 
 	server := &http.Server{
 		Addr:              addr,
@@ -54,9 +55,11 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func initStore() *dispatch.Store {
+func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration) {
 	dbURL := os.Getenv("DATABASE_URL")
 	redisURL := envOrDefault("REDIS_URL", "redis://redis:6379")
+	authEnabled := envOrDefault("AUTH_MODE", "memory")
+	authTTL := parseDuration(envOrDefault("AUTH_TTL", "720h")) // default 30 days
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -64,6 +67,8 @@ func initStore() *dispatch.Store {
 	var (
 		persist dispatch.Persistence
 		geoLoc  dispatch.GeoLocator = geo.NewInMemoryGeo()
+		authMem *auth.InMemoryStore
+		idDB    *storage.IdentityStore
 	)
 
 	if dbURL != "" {
@@ -75,6 +80,11 @@ func initStore() *dispatch.Store {
 		} else {
 			log.Printf("using PostgreSQL persistence")
 			persist = storage.NewPostgres(pool)
+			idDB = storage.NewIdentityStore(pool)
+			if err := idDB.EnsureSchema(ctx); err != nil {
+				log.Printf("identity schema init failed: %v", err)
+				idDB = nil
+			}
 		}
 	}
 
@@ -93,7 +103,36 @@ func initStore() *dispatch.Store {
 		}
 	}
 
-	return dispatch.NewStoreWithDeps(persist, geoLoc)
+	if authEnabled == "memory" && authMem == nil {
+		authMem = auth.NewInMemoryStore()
+		log.Printf("auth: in-memory token issuance enabled")
+		if idDB != nil {
+			seedIdentities(ctx, idDB, authMem)
+		}
+	}
+
+	return dispatch.NewStoreWithDeps(persist, geoLoc), authMem, idDB, authTTL
+}
+
+func parseDuration(val string) time.Duration {
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+func seedIdentities(ctx context.Context, db *storage.IdentityStore, mem *auth.InMemoryStore) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	all, err := db.All(ctx)
+	if err != nil {
+		log.Printf("failed to preload identities: %v", err)
+		return
+	}
+	for _, ident := range all {
+		mem.Seed(ident)
+	}
 }
 
 // adapter structs to avoid package import cycle

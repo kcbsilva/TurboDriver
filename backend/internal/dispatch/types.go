@@ -30,6 +30,22 @@ type DriverState struct {
 	RadiusKM  float64     `json:"radiusKm"`
 }
 
+type IdentityRole string
+
+const (
+	RolePassenger IdentityRole = "passenger"
+	RoleDriver    IdentityRole = "driver"
+	RoleAdmin     IdentityRole = "admin"
+)
+
+type Identity struct {
+	ID    string       `json:"id"`
+	Role  IdentityRole `json:"role"`
+	Token string       `json:"token,omitempty"`
+	// ExpiresAt is optional; nil means no expiry.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
 type Ride struct {
 	ID          string     `json:"id"`
 	PassengerID string     `json:"passengerId"`

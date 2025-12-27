@@ -247,16 +247,67 @@ func (s *Store) persistRideAndDriver(ride Ride, driver DriverState) {
 		return
 	}
 	_ = s.persistence.UpdateRideStatus(ride.ID, ride.Status)
-	if ride.DriverID != "" {
-		_ = s.persistence.SetDriverRide(ride.DriverID, driver.RideID, driver.Status, driver.Available)
+	if driver.ID != "" {
+		_ = s.persistence.SetDriverRide(driver.ID, driver.RideID, driver.Status, driver.Available)
 	}
 }
 
+// ReassignIfUnaccepted frees the current driver and attempts to reassign if still unaccepted.
+func (s *Store) ReassignIfUnaccepted(rideID, expectedDriverID string) (Ride, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ride, ok := s.rides[rideID]
+	if !ok {
+		return Ride{}, false, errors.New("ride not found")
+	}
+	if ride.Status != RideAssigned || ride.DriverID != expectedDriverID {
+		return ride, false, nil
+	}
+
+	// free prior driver
+	if driver, ok := s.drivers[expectedDriverID]; ok {
+		driver.Status = "idle"
+		driver.Available = true
+		driver.RideID = ""
+		s.drivers[driver.ID] = driver
+		s.persistRideAndDriver(ride, driver)
+	}
+
+	exclude := map[string]struct{}{expectedDriverID: {}}
+	nextID, _ := s.findNearestDriverLockedExcluding(ride.Pickup, 3, exclude)
+	if nextID == "" {
+		ride.Status = RideRequested
+		ride.DriverID = ""
+		s.rides[rideID] = ride
+		s.persistRideAndDriver(ride, DriverState{})
+		return ride, true, nil
+	}
+
+	ride.DriverID = nextID
+	ride.Status = RideAssigned
+	s.rides[rideID] = ride
+
+	driver := s.drivers[nextID]
+	driver.RideID = ride.ID
+	driver.Status = "assigned"
+	driver.Available = false
+	s.drivers[nextID] = driver
+	s.persistRideAndDriver(ride, driver)
+	return ride, true, nil
+}
+
 func (s *Store) findNearestDriverLocked(target Coordinate, radiusKM float64) (string, float64) {
+	return s.findNearestDriverLockedExcluding(target, radiusKM, nil)
+}
+
+func (s *Store) findNearestDriverLockedExcluding(target Coordinate, radiusKM float64, exclude map[string]struct{}) (string, float64) {
 	if s.geo != nil {
 		id, dist, err := s.geo.Nearby(target.Latitude, target.Longitude, radiusKM)
 		if err == nil {
-			if driver, ok := s.drivers[id]; ok && driver.Available {
+			if _, skip := exclude[id]; skip {
+				// fall back to scan
+			} else if driver, ok := s.drivers[id]; ok && driver.Available {
 				return id, dist
 			}
 		}
@@ -264,6 +315,11 @@ func (s *Store) findNearestDriverLocked(target Coordinate, radiusKM float64) (st
 	var bestID string
 	bestDist := math.MaxFloat64
 	for id, driver := range s.drivers {
+		if exclude != nil {
+			if _, skip := exclude[id]; skip {
+				continue
+			}
+		}
 		if !driver.Available {
 			continue
 		}
