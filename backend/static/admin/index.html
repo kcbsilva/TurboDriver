@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TurboDriver Admin</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #0b1726; color: #e8f1ff; }
+    h1 { margin-bottom: 8px; }
+    .card { background: #122237; border: 1px solid #1f3b5c; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+    label { display: block; margin-top: 8px; font-size: 14px; color: #a8c0e0; }
+    input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #2b4d75; background: #0f1c2e; color: #e8f1ff; }
+    button { margin-top: 12px; padding: 10px 14px; border: none; border-radius: 6px; background: #2f8cff; color: white; cursor: pointer; }
+    button:hover { background: #297ae0; }
+    pre { background: #0f1c2e; padding: 12px; border-radius: 8px; overflow: auto; max-height: 300px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  </style>
+</head>
+<body>
+  <h1>TurboDriver Admin</h1>
+  <div class="grid">
+    <div class="card">
+      <h3>Ride Snapshot</h3>
+      <label>API Base</label>
+      <input id="api" value="http://localhost:8080">
+      <label>Admin Token</label>
+      <input id="token" placeholder="admin token">
+      <label>Ride ID</label>
+      <input id="rideId" placeholder="ride_xxx">
+      <button onclick="fetchRide()">Fetch Ride</button>
+      <pre id="rideOut"></pre>
+    </div>
+    <div class="card">
+      <h3>Ride Events</h3>
+      <label>Limit</label>
+      <input id="limit" value="50">
+      <label>Offset</label>
+      <input id="offset" value="0">
+      <button onclick="fetchEvents()">Fetch Events</button>
+      <pre id="eventOut"></pre>
+    </div>
+  </div>
+<script>
+async function fetchRide() {
+  const api = document.getElementById('api').value;
+  const rideId = document.getElementById('rideId').value;
+  const token = document.getElementById('token').value;
+  if (!rideId) return;
+  const res = await fetch(`${api}/api/rides/${rideId}`, {
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+  });
+  document.getElementById('rideOut').textContent = await res.text();
+}
+async function fetchEvents() {
+  const api = document.getElementById('api').value;
+  const rideId = document.getElementById('rideId').value;
+  const token = document.getElementById('token').value;
+  const limit = document.getElementById('limit').value || 50;
+  const offset = document.getElementById('offset').value || 0;
+  if (!rideId) return;
+  const res = await fetch(`${api}/api/admin/rides/${rideId}/events?limit=${limit}&offset=${offset}`, {
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+  });
+  document.getElementById('eventOut').textContent = await res.text();
+}
+</script>
+</body>
+</html>

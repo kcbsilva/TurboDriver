@@ -227,6 +227,38 @@ The API listens on `http://localhost:8080`.
   - Role enforcement: drivers may send locations/accept/complete; passengers may request rides/cancel; admins bypass checks and can register new identities.
 - Identity persistence: when Postgres is available, identities are stored in `identities` table and read alongside in-memory cache (auth tokens survive restarts).
   - Tokens default to 30d TTL (`AUTH_TTL`, e.g. `24h`), stored in DB with expiry and skipped if expired when seeding the cache.
+  - Ride events are stored in `ride_events` (if Postgres is enabled) and exposed via the admin endpoint.
+  - Ride history endpoints: `/api/history/passenger` and `/api/history/driver` (role-scoped).
+
+### Seeding Identities (dev)
+
+Sample seed script to create passenger/driver/admin tokens in Postgres:
+```bash
+cd backend
+go run ./cmd/seed
+```
+Use `DATABASE_URL` env to point at your DB (defaults to docker-compose Postgres).
+
+### Simulate Driver Heartbeats (dev)
+
+Send a series of driver location updates to the API:
+```bash
+cd backend
+go run ./cmd/heartbeat --driver=sim_driver_1 --token=DRIVER_TOKEN --lat=40.758 --lon=-73.9855 --count=20 --interval=3s
+```
+Flags: `--api` (default http://localhost:8080), `--accuracy`, `--delta-lat`, `--delta-lon` to move per tick.
+
+### Simulate Ride Request + Accept (dev)
+
+Trigger a ride request and auto-accept with a driver:
+```bash
+cd backend
+go run ./cmd/simulate --passenger-token=PASS_TOKEN --driver-token=DRIVER_TOKEN --driver-id=sim_driver_1 --lat=40.758 --lon=-73.9855
+```
+
+### Admin Viewer (static)
+
+`backend/static/admin/index.html` is a minimal viewer to query rides and events. Open in browser, set API base/token, and fetch ride/events.
 
 ### HTTP & WebSocket Surface (MVP)
 
@@ -239,6 +271,9 @@ The API listens on `http://localhost:8080`.
 - `POST /api/rides/{rideID}/complete` – mark ride complete. Frees driver.
 - `GET /ws/rides/{rideID}` – subscribe to ride + driver updates (server pushes JSON frames).
   - Acceptance window: ~15 seconds. If a ride stays `assigned` without acceptance, it frees the driver and tries to reassign another nearby driver; if none are found, the ride reverts to `requested`.
+  - `GET /api/history/passenger` – authenticated passenger ride history (passenger only).
+  - `GET /api/history/driver` – authenticated driver ride history (driver only).
+- `GET /api/admin/rides/{rideID}/events` – admin-only audit log of ride events.
 
 ### Matching Rules (current)
 

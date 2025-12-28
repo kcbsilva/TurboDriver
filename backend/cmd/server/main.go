@@ -21,7 +21,7 @@ import (
 func main() {
 	addr := envOrDefault("HTTP_ADDR", ":8080")
 
-	store, authStore, identityDB, authTTL := initStore()
+	store, authStore, identityDB, authTTL, eventLogger, rideLister := initStore()
 	hub := dispatch.NewHub()
 	go hub.Run()
 
@@ -34,7 +34,7 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL)
+	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL, eventLogger, rideLister)
 
 	server := &http.Server{
 		Addr:              addr,
@@ -55,7 +55,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration) {
+func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration, storage.EventLogger, dispatch.RideLister) {
 	dbURL := os.Getenv("DATABASE_URL")
 	redisURL := envOrDefault("REDIS_URL", "redis://redis:6379")
 	authEnabled := envOrDefault("AUTH_MODE", "memory")
@@ -69,6 +69,8 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		geoLoc  dispatch.GeoLocator = geo.NewInMemoryGeo()
 		authMem *auth.InMemoryStore
 		idDB    *storage.IdentityStore
+		events  storage.EventLogger
+		rideLst dispatch.RideLister
 	)
 
 	if dbURL != "" {
@@ -79,7 +81,10 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			log.Printf("schema init failed, falling back to in-memory: %v", err)
 		} else {
 			log.Printf("using PostgreSQL persistence")
-			persist = storage.NewPostgres(pool)
+			pg := storage.NewPostgres(pool)
+			persist = pg
+			events = pg
+			rideLst = pg
 			idDB = storage.NewIdentityStore(pool)
 			if err := idDB.EnsureSchema(ctx); err != nil {
 				log.Printf("identity schema init failed: %v", err)
@@ -111,7 +116,7 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		}
 	}
 
-	return dispatch.NewStoreWithDeps(persist, geoLoc), authMem, idDB, authTTL
+	return dispatch.NewStoreWithDeps(persist, geoLoc), authMem, idDB, authTTL, events, rideLst
 }
 
 func parseDuration(val string) time.Duration {

@@ -139,21 +139,22 @@ func (s *Store) GetRide(id string) (Ride, bool) {
 }
 
 // AcceptRide transitions a ride to accepted and marks the driver as busy.
-func (s *Store) AcceptRide(rideID, driverID string) (Ride, error) {
+func (s *Store) AcceptRide(rideID, driverID string) (Ride, RideStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ride, ok := s.rides[rideID]
 	if !ok {
-		return Ride{}, errors.New("ride not found")
+		return Ride{}, "", errors.New("ride not found")
 	}
 	if ride.DriverID != driverID {
-		return Ride{}, errors.New("driver mismatch")
+		return Ride{}, "", errors.New("driver mismatch")
 	}
 	if ride.Status != RideAssigned {
-		return Ride{}, errors.New("ride not in assignable state")
+		return Ride{}, "", errors.New("ride not in assignable state")
 	}
 
+	prev := ride.Status
 	ride.Status = RideAccepted
 	s.rides[rideID] = ride
 
@@ -164,22 +165,23 @@ func (s *Store) AcceptRide(rideID, driverID string) (Ride, error) {
 	s.drivers[driverID] = driver
 
 	s.persistRideAndDriver(ride, driver)
-	return ride, nil
+	return ride, prev, nil
 }
 
 // CancelRide cancels a ride and frees the driver.
-func (s *Store) CancelRide(rideID string) (Ride, error) {
+func (s *Store) CancelRide(rideID string) (Ride, RideStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ride, ok := s.rides[rideID]
 	if !ok {
-		return Ride{}, errors.New("ride not found")
+		return Ride{}, "", errors.New("ride not found")
 	}
 	if ride.Status == RideCancelled || ride.Status == RideComplete {
-		return Ride{}, errors.New("ride already finished")
+		return Ride{}, "", errors.New("ride already finished")
 	}
 
+	prev := ride.Status
 	ride.Status = RideCancelled
 	s.rides[rideID] = ride
 
@@ -194,22 +196,23 @@ func (s *Store) CancelRide(rideID string) (Ride, error) {
 		s.persistRideAndDriver(ride, DriverState{})
 	}
 
-	return ride, nil
+	return ride, prev, nil
 }
 
 // CompleteRide marks a ride complete and frees the driver.
-func (s *Store) CompleteRide(rideID string) (Ride, error) {
+func (s *Store) CompleteRide(rideID string) (Ride, RideStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ride, ok := s.rides[rideID]
 	if !ok {
-		return Ride{}, errors.New("ride not found")
+		return Ride{}, "", errors.New("ride not found")
 	}
 	if ride.Status != RideAccepted && ride.Status != RideEnRoute {
-		return Ride{}, errors.New("ride not in progress")
+		return Ride{}, "", errors.New("ride not in progress")
 	}
 
+	prev := ride.Status
 	ride.Status = RideComplete
 	s.rides[rideID] = ride
 
@@ -224,7 +227,7 @@ func (s *Store) CompleteRide(rideID string) (Ride, error) {
 		s.persistRideAndDriver(ride, DriverState{})
 	}
 
-	return ride, nil
+	return ride, prev, nil
 }
 
 // UpdateRideStatus allows direct status updates used by persistence or admin overrides.

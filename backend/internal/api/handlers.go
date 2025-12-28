@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"turbodriver/internal/dispatch"
+	"turbodriver/internal/storage"
 )
 
 func requireRole(w http.ResponseWriter, r *http.Request, enforce bool, allowed ...dispatch.IdentityRole) bool {
@@ -73,9 +75,11 @@ func canAccessRideWithIdentity(id dispatch.Identity, ride dispatch.Ride) bool {
 }
 
 type Handler struct {
-	store *dispatch.Store
-	hub   *dispatch.Hub
-	auth  authConfig
+	store  *dispatch.Store
+	hub    *dispatch.Hub
+	auth   authConfig
+	events storage.EventLogger
+	db     dispatch.RideLister
 }
 
 type driverLocationPayload struct {
@@ -154,6 +158,11 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.hub.PublishRideUpdate(ride)
+	h.logRideEvent(r.Context(), ride, "ride_requested", map[string]any{
+		"passengerId": ride.PassengerID,
+		"driverId":    ride.DriverID,
+		"statusTo":    ride.Status,
+	})
 	go h.awaitAcceptance(ride.ID, ride.DriverID)
 	respondJSON(w, http.StatusAccepted, ride)
 }
@@ -186,11 +195,16 @@ func (h *Handler) AcceptRide(w http.ResponseWriter, r *http.Request) {
 	if !matchIdentity(w, r, enforce, payload.DriverID) {
 		return
 	}
-	ride, err := h.store.AcceptRide(rideID, payload.DriverID)
+	ride, prevStatus, err := h.store.AcceptRide(rideID, payload.DriverID)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.logRideEvent(r.Context(), ride, "ride_accepted", map[string]any{
+		"driverId":   payload.DriverID,
+		"statusFrom": prevStatus,
+		"statusTo":   ride.Status,
+	})
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -201,7 +215,7 @@ func (h *Handler) CancelRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rideID := chi.URLParam(r, "rideID")
-	ride, err := h.store.CancelRide(rideID)
+	ride, prevStatus, err := h.store.CancelRide(rideID)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -210,6 +224,10 @@ func (h *Handler) CancelRide(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusForbidden, "forbidden")
 		return
 	}
+	h.logRideEvent(r.Context(), ride, "ride_cancelled", map[string]any{
+		"statusFrom": prevStatus,
+		"statusTo":   ride.Status,
+	})
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -220,7 +238,7 @@ func (h *Handler) CompleteRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rideID := chi.URLParam(r, "rideID")
-	ride, err := h.store.CompleteRide(rideID)
+	ride, prevStatus, err := h.store.CompleteRide(rideID)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
@@ -228,6 +246,11 @@ func (h *Handler) CompleteRide(w http.ResponseWriter, r *http.Request) {
 	if !matchIdentity(w, r, enforce, ride.DriverID) {
 		return
 	}
+	h.logRideEvent(r.Context(), ride, "ride_completed", map[string]any{
+		"driverId":   ride.DriverID,
+		"statusFrom": prevStatus,
+		"statusTo":   ride.Status,
+	})
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -240,6 +263,11 @@ func (h *Handler) awaitAcceptance(rideID, driverID string) {
 	if err != nil || !changed {
 		return
 	}
+	h.logRideEvent(context.Background(), ride, "ride_reassigned", map[string]any{
+		"previousDriver": driverID,
+		"newDriver":      ride.DriverID,
+		"statusTo":       ride.Status,
+	})
 	h.hub.PublishRideUpdate(ride)
 }
 
@@ -295,4 +323,121 @@ func (h *Handler) RegisterIdentity(w http.ResponseWriter, r *http.Request) {
 		h.auth.db.Save(ctx, identity, ttl)
 	}
 	respondJSON(w, http.StatusOK, identity)
+}
+
+func (h *Handler) ListRideEvents(w http.ResponseWriter, r *http.Request) {
+	if h.events == nil {
+		respondError(w, http.StatusServiceUnavailable, "event log unavailable")
+		return
+	}
+	if !requireRole(w, r, true, dispatch.RoleAdmin) {
+		return
+	}
+	rideID := chi.URLParam(r, "rideID")
+	limit := parseLimit(r.URL.Query().Get("limit"), 100)
+	offset := parseOffset(r.URL.Query().Get("offset"))
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	events, err := h.events.ListRideEvents(ctx, rideID, limit, offset)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch events")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"data":   events,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (h *Handler) ListPassengerRides(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		respondError(w, http.StatusServiceUnavailable, "ride history unavailable")
+		return
+	}
+	identity, ok := identityFromContext(r.Context())
+	if !ok || identity.Role != dispatch.RolePassenger {
+		respondError(w, http.StatusForbidden, "passenger only")
+		return
+	}
+	limit := parseLimit(r.URL.Query().Get("limit"), 100)
+	offset := parseOffset(r.URL.Query().Get("offset"))
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	rides, err := h.db.ListRidesByPassenger(ctx, identity.ID, limit, offset)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch rides")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"data":   rides,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (h *Handler) ListDriverRides(w http.ResponseWriter, r *http.Request) {
+	if h.db == nil {
+		respondError(w, http.StatusServiceUnavailable, "ride history unavailable")
+		return
+	}
+	identity, ok := identityFromContext(r.Context())
+	if !ok || identity.Role != dispatch.RoleDriver {
+		respondError(w, http.StatusForbidden, "driver only")
+		return
+	}
+	limit := parseLimit(r.URL.Query().Get("limit"), 100)
+	offset := parseOffset(r.URL.Query().Get("offset"))
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	rides, err := h.db.ListRidesByDriver(ctx, identity.ID, limit, offset)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch rides")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"data":   rides,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func parseLimit(raw string, def int) int {
+	if raw == "" {
+		return def
+	}
+	if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 1000 {
+		return v
+	}
+	return def
+}
+
+func parseOffset(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	if v, err := strconv.Atoi(raw); err == nil && v >= 0 {
+		return v
+	}
+	return 0
+}
+
+func (h *Handler) logRideEvent(ctx context.Context, ride dispatch.Ride, evtType string, payload map[string]any) {
+	if h.events == nil {
+		return
+	}
+	body, _ := json.Marshal(payload)
+	var actorID, actorRole string
+	if id, ok := identityFromContext(ctx); ok {
+		actorID = id.ID
+		actorRole = string(id.Role)
+	}
+	_ = h.events.AppendRideEvent(ctx, storage.RideEvent{
+		RideID:    ride.ID,
+		Type:      evtType,
+		Payload:   body,
+		ActorID:   actorID,
+		ActorRole: actorRole,
+		CreatedAt: time.Now(),
+	})
 }

@@ -1,6 +1,9 @@
 package dispatch
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type RideStatus string
 
@@ -21,13 +24,13 @@ type Coordinate struct {
 }
 
 type DriverState struct {
-	ID        string      `json:"id"`
-	Available bool        `json:"available"`
-	Location  Coordinate  `json:"location"`
-	UpdatedAt time.Time   `json:"updatedAt"`
-	RideID    string      `json:"rideId,omitempty"`
-	Status    string      `json:"status"`
-	RadiusKM  float64     `json:"radiusKm"`
+	ID        string     `json:"id"`
+	Available bool       `json:"available"`
+	Location  Coordinate `json:"location"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	RideID    string     `json:"rideId,omitempty"`
+	Status    string     `json:"status"`
+	RadiusKM  float64    `json:"radiusKm"`
 }
 
 type IdentityRole string
@@ -53,4 +56,10 @@ type Ride struct {
 	Status      RideStatus `json:"status"`
 	Pickup      Coordinate `json:"pickup"`
 	CreatedAt   time.Time  `json:"createdAt"`
+}
+
+// RideLister provides ride history for identities.
+type RideLister interface {
+	ListRidesByPassenger(ctx context.Context, passengerID string, limit, offset int) ([]Ride, error)
+	ListRidesByDriver(ctx context.Context, driverID string, limit, offset int) ([]Ride, error)
 }

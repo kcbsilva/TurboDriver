@@ -44,7 +44,20 @@ CREATE TABLE IF NOT EXISTS rides (
 	pickup_accuracy DOUBLE PRECISION,
 	pickup_ts TIMESTAMPTZ NOT NULL,
 	created_at TIMESTAMPTZ NOT NULL
-);`)
+);
+
+CREATE TABLE IF NOT EXISTS ride_events (
+	id BIGSERIAL PRIMARY KEY,
+	ride_id TEXT NOT NULL,
+	event_type TEXT NOT NULL,
+	payload JSONB,
+	actor_id TEXT,
+	actor_role TEXT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ride_events_ride_id_idx ON ride_events(ride_id, created_at);
+`)
 	return err
 }
 
@@ -111,6 +124,60 @@ FROM rides WHERE id = $1
 		ride.Pickup.Accuracy = *acc
 	}
 	return ride, true, nil
+}
+
+func (p *Postgres) ListRidesByPassenger(ctx context.Context, passengerID string, limit, offset int) ([]dispatch.Ride, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT id, passenger_id, driver_id, status, pickup_lat, pickup_long, pickup_accuracy, pickup_ts, created_at
+FROM rides
+WHERE passenger_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`, passengerID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rides []dispatch.Ride
+	for rows.Next() {
+		var r dispatch.Ride
+		var acc *float64
+		if err := rows.Scan(&r.ID, &r.PassengerID, &r.DriverID, &r.Status, &r.Pickup.Latitude, &r.Pickup.Longitude, &acc, &r.Pickup.At, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		if acc != nil {
+			r.Pickup.Accuracy = *acc
+		}
+		rides = append(rides, r)
+	}
+	return rides, rows.Err()
+}
+
+func (p *Postgres) ListRidesByDriver(ctx context.Context, driverID string, limit, offset int) ([]dispatch.Ride, error) {
+	rows, err := p.pool.Query(ctx, `
+SELECT id, passenger_id, driver_id, status, pickup_lat, pickup_long, pickup_accuracy, pickup_ts, created_at
+FROM rides
+WHERE driver_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3
+`, driverID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rides []dispatch.Ride
+	for rows.Next() {
+		var r dispatch.Ride
+		var acc *float64
+		if err := rows.Scan(&r.ID, &r.PassengerID, &r.DriverID, &r.Status, &r.Pickup.Latitude, &r.Pickup.Longitude, &acc, &r.Pickup.At, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		if acc != nil {
+			r.Pickup.Accuracy = *acc
+		}
+		rides = append(rides, r)
+	}
+	return rides, rows.Err()
 }
 
 func DefaultPool(ctx context.Context, url string) (*pgxpool.Pool, error) {
