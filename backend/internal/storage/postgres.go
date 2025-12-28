@@ -20,44 +20,7 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 
 // EnsureSchema creates minimal tables for rides and drivers if they do not exist.
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS drivers (
-	id TEXT PRIMARY KEY,
-	latitude DOUBLE PRECISION NOT NULL,
-	longitude DOUBLE PRECISION NOT NULL,
-	accuracy DOUBLE PRECISION,
-	ts TIMESTAMPTZ NOT NULL,
-	status TEXT NOT NULL,
-	ride_id TEXT,
-	radius_km DOUBLE PRECISION NOT NULL,
-	available BOOLEAN NOT NULL,
-	updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS rides (
-	id TEXT PRIMARY KEY,
-	passenger_id TEXT NOT NULL,
-	driver_id TEXT,
-	status TEXT NOT NULL,
-	pickup_lat DOUBLE PRECISION NOT NULL,
-	pickup_long DOUBLE PRECISION NOT NULL,
-	pickup_accuracy DOUBLE PRECISION,
-	pickup_ts TIMESTAMPTZ NOT NULL,
-	created_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS ride_events (
-	id BIGSERIAL PRIMARY KEY,
-	ride_id TEXT NOT NULL,
-	event_type TEXT NOT NULL,
-	payload JSONB,
-	actor_id TEXT,
-	actor_role TEXT,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS ride_events_ride_id_idx ON ride_events(ride_id, created_at);
-`)
+	_, err := pool.Exec(ctx, `SELECT 1`)
 	return err
 }
 
@@ -178,6 +141,22 @@ LIMIT $2 OFFSET $3
 		rides = append(rides, r)
 	}
 	return rides, rows.Err()
+}
+
+func (p *Postgres) CountRidesByPassenger(ctx context.Context, passengerID string) (int, error) {
+	var count int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE passenger_id = $1`, passengerID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (p *Postgres) CountRidesByDriver(ctx context.Context, driverID string) (int, error) {
+	var count int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM rides WHERE driver_id = $1`, driverID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func DefaultPool(ctx context.Context, url string) (*pgxpool.Pool, error) {

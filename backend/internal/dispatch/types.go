@@ -58,8 +58,30 @@ type Ride struct {
 	CreatedAt   time.Time  `json:"createdAt"`
 }
 
+type RideEvent struct {
+	RideID    string    `json:"rideId"`
+	Type      string    `json:"type"`
+	Payload   []byte    `json:"payload,omitempty"`
+	ActorID   string    `json:"actorId,omitempty"`
+	ActorRole string    `json:"actorRole,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type EventLogger interface {
+	AppendRideEvent(ctx context.Context, evt RideEvent) error
+	ListRideEvents(ctx context.Context, rideID string, limit, offset int) ([]RideEvent, error)
+	CountRideEvents(ctx context.Context, rideID string) (int, error)
+}
+
+type RideTransaction interface {
+	CreateRideWithEvent(ctx context.Context, ride Ride, event RideEvent, driver DriverState) error
+	UpdateRideWithEvent(ctx context.Context, ride Ride, event RideEvent, driver *DriverState) error
+}
+
 // RideLister provides ride history for identities.
 type RideLister interface {
 	ListRidesByPassenger(ctx context.Context, passengerID string, limit, offset int) ([]Ride, error)
 	ListRidesByDriver(ctx context.Context, driverID string, limit, offset int) ([]Ride, error)
+	CountRidesByPassenger(ctx context.Context, passengerID string) (int, error)
+	CountRidesByDriver(ctx context.Context, driverID string) (int, error)
 }

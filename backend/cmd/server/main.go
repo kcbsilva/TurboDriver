@@ -24,6 +24,7 @@ func main() {
 	store, authStore, identityDB, authTTL, eventLogger, rideLister := initStore()
 	hub := dispatch.NewHub()
 	go hub.Run()
+	go startDriverPrune(store)
 
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -137,6 +138,14 @@ func seedIdentities(ctx context.Context, db *storage.IdentityStore, mem *auth.In
 	}
 	for _, ident := range all {
 		mem.Seed(ident)
+	}
+}
+
+func startDriverPrune(store *dispatch.Store) {
+	ttl := parseDuration(envOrDefault("DRIVER_TTL", "5m"))
+	ticker := time.NewTicker(time.Minute)
+	for range ticker.C {
+		store.PruneStaleDrivers(ttl)
 	}
 }
 

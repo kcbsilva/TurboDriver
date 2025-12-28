@@ -259,6 +259,11 @@ go run ./cmd/simulate --passenger-token=PASS_TOKEN --driver-token=DRIVER_TOKEN -
 ### Admin Viewer (static)
 
 `backend/static/admin/index.html` is a minimal viewer to query rides and events. Open in browser, set API base/token, and fetch ride/events.
+Or run a local server:
+```bash
+cd backend
+go run ./cmd/serve-admin --addr=:8090
+```
 
 ### HTTP & WebSocket Surface (MVP)
 
@@ -274,6 +279,7 @@ go run ./cmd/simulate --passenger-token=PASS_TOKEN --driver-token=DRIVER_TOKEN -
   - `GET /api/history/passenger` – authenticated passenger ride history (passenger only).
   - `GET /api/history/driver` – authenticated driver ride history (driver only).
 - `GET /api/admin/rides/{rideID}/events` – admin-only audit log of ride events.
+  - History/events return `{data, limit, offset, total}` for pagination.
 
 ### Matching Rules (current)
 

@@ -10,7 +10,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"turbodriver/internal/dispatch"
-	"turbodriver/internal/storage"
 )
 
 func requireRole(w http.ResponseWriter, r *http.Request, enforce bool, allowed ...dispatch.IdentityRole) bool {
@@ -78,7 +77,7 @@ type Handler struct {
 	store  *dispatch.Store
 	hub    *dispatch.Hub
 	auth   authConfig
-	events storage.EventLogger
+	events dispatch.EventLogger
 	db     dispatch.RideLister
 }
 
@@ -339,6 +338,7 @@ func (h *Handler) ListRideEvents(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	events, err := h.events.ListRideEvents(ctx, rideID, limit, offset)
+	total, _ := h.events.CountRideEvents(ctx, rideID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to fetch events")
 		return
@@ -347,6 +347,7 @@ func (h *Handler) ListRideEvents(w http.ResponseWriter, r *http.Request) {
 		"data":   events,
 		"limit":  limit,
 		"offset": offset,
+		"total":  total,
 	})
 }
 
@@ -365,6 +366,7 @@ func (h *Handler) ListPassengerRides(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	rides, err := h.db.ListRidesByPassenger(ctx, identity.ID, limit, offset)
+	total, _ := h.db.CountRidesByPassenger(ctx, identity.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to fetch rides")
 		return
@@ -373,6 +375,7 @@ func (h *Handler) ListPassengerRides(w http.ResponseWriter, r *http.Request) {
 		"data":   rides,
 		"limit":  limit,
 		"offset": offset,
+		"total":  total,
 	})
 }
 
@@ -391,6 +394,7 @@ func (h *Handler) ListDriverRides(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	rides, err := h.db.ListRidesByDriver(ctx, identity.ID, limit, offset)
+	total, _ := h.db.CountRidesByDriver(ctx, identity.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to fetch rides")
 		return
@@ -399,6 +403,7 @@ func (h *Handler) ListDriverRides(w http.ResponseWriter, r *http.Request) {
 		"data":   rides,
 		"limit":  limit,
 		"offset": offset,
+		"total":  total,
 	})
 }
 
@@ -432,7 +437,7 @@ func (h *Handler) logRideEvent(ctx context.Context, ride dispatch.Ride, evtType 
 		actorID = id.ID
 		actorRole = string(id.Role)
 	}
-	_ = h.events.AppendRideEvent(ctx, storage.RideEvent{
+	_ = h.events.AppendRideEvent(ctx, dispatch.RideEvent{
 		RideID:    ride.ID,
 		Type:      evtType,
 		Payload:   body,

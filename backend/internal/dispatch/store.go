@@ -1,6 +1,8 @@
 package dispatch
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +26,7 @@ type Store struct {
 	rides       map[string]Ride
 	persistence Persistence
 	geo         GeoLocator
+	tx          RideTransaction
 }
 
 func NewStore() *Store {
@@ -46,7 +49,15 @@ func NewStoreWithDeps(p Persistence, g GeoLocator) *Store {
 		rides:       make(map[string]Ride),
 		persistence: p,
 		geo:         g,
+		tx:          toRideTx(p),
 	}
+}
+
+func toRideTx(p Persistence) RideTransaction {
+	if tx, ok := p.(RideTransaction); ok {
+		return tx
+	}
+	return nil
 }
 
 // UpdateDriverLocation sets the latest known driver position and marks them available.
@@ -91,13 +102,14 @@ func (s *Store) CreateRide(passengerID string, pickup Coordinate) (Ride, error) 
 		return Ride{}, errors.New("no nearby drivers available")
 	}
 
+	now := time.Now()
 	ride := Ride{
-		ID:          fmt.Sprintf("ride_%d", time.Now().UnixNano()),
+		ID:          fmt.Sprintf("ride_%d", now.UnixNano()),
 		PassengerID: passengerID,
 		DriverID:    nearestID,
 		Status:      RideAssigned,
 		Pickup:      pickup,
-		CreatedAt:   time.Now(),
+		CreatedAt:   now,
 	}
 
 	driver := s.drivers[nearestID]
@@ -108,12 +120,11 @@ func (s *Store) CreateRide(passengerID string, pickup Coordinate) (Ride, error) 
 	s.drivers[nearestID] = driver
 	s.rides[ride.ID] = ride
 
-	if s.persistence != nil {
-		if err := s.persistence.SaveRide(ride); err != nil {
-			return Ride{}, err
-		}
-		_ = s.persistence.SetDriverRide(driver.ID, driver.RideID, driver.Status, driver.Available)
-	}
+	s.persistRideAndDriverTx(ride, driver, "ride_assigned", map[string]any{
+		"statusTo": ride.Status,
+		"driverId": driver.ID,
+		"distKm":   dist,
+	})
 
 	_ = dist // retained for future logging/metrics
 	return ride, nil
@@ -164,7 +175,10 @@ func (s *Store) AcceptRide(rideID, driverID string) (Ride, RideStatus, error) {
 	driver.RideID = ride.ID
 	s.drivers[driverID] = driver
 
-	s.persistRideAndDriver(ride, driver)
+	s.persistRideAndDriverTx(ride, driver, "ride_accepted", map[string]any{
+		"statusFrom": prev,
+		"statusTo":   ride.Status,
+	})
 	return ride, prev, nil
 }
 
@@ -191,9 +205,15 @@ func (s *Store) CancelRide(rideID string) (Ride, RideStatus, error) {
 		driver.Available = true
 		driver.RideID = ""
 		s.drivers[driver.ID] = driver
-		s.persistRideAndDriver(ride, driver)
+		s.persistRideAndDriverTx(ride, driver, "ride_cancelled", map[string]any{
+			"statusFrom": prev,
+			"statusTo":   ride.Status,
+		})
 	} else {
-		s.persistRideAndDriver(ride, DriverState{})
+		s.persistRideAndDriverTx(ride, DriverState{}, "ride_cancelled", map[string]any{
+			"statusFrom": prev,
+			"statusTo":   ride.Status,
+		})
 	}
 
 	return ride, prev, nil
@@ -222,9 +242,15 @@ func (s *Store) CompleteRide(rideID string) (Ride, RideStatus, error) {
 		driver.Available = true
 		driver.RideID = ""
 		s.drivers[driver.ID] = driver
-		s.persistRideAndDriver(ride, driver)
+		s.persistRideAndDriverTx(ride, driver, "ride_completed", map[string]any{
+			"statusFrom": prev,
+			"statusTo":   ride.Status,
+		})
 	} else {
-		s.persistRideAndDriver(ride, DriverState{})
+		s.persistRideAndDriverTx(ride, DriverState{}, "ride_completed", map[string]any{
+			"statusFrom": prev,
+			"statusTo":   ride.Status,
+		})
 	}
 
 	return ride, prev, nil
@@ -252,6 +278,42 @@ func (s *Store) persistRideAndDriver(ride Ride, driver DriverState) {
 	_ = s.persistence.UpdateRideStatus(ride.ID, ride.Status)
 	if driver.ID != "" {
 		_ = s.persistence.SetDriverRide(driver.ID, driver.RideID, driver.Status, driver.Available)
+	}
+}
+
+func (s *Store) persistRideAndDriverTx(ride Ride, driver DriverState, evt string, payload map[string]any) {
+	if s.tx != nil {
+		body, _ := json.Marshal(payload)
+		var drv *DriverState
+		if driver.ID != "" {
+			drv = &driver
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		// On creation, UpdateRideWithEvent will still upsert status.
+		_ = s.tx.UpdateRideWithEvent(ctx, ride, RideEvent{
+			RideID:    ride.ID,
+			Type:      evt,
+			Payload:   body,
+			CreatedAt: time.Now(),
+		}, drv)
+		return
+	}
+	s.persistRideAndDriver(ride, driver)
+}
+
+// PruneStaleDrivers removes drivers whose heartbeats are older than ttl.
+func (s *Store) PruneStaleDrivers(ttl time.Duration) {
+	cutoff := time.Now().Add(-ttl)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, driver := range s.drivers {
+		if driver.UpdatedAt.Before(cutoff) && driver.RideID == "" {
+			delete(s.drivers, id)
+			if s.geo != nil {
+				_ = s.geo.Remove(id)
+			}
+		}
 	}
 }
 
