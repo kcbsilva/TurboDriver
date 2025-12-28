@@ -20,8 +20,7 @@ func NewPostgres(pool *pgxpool.Pool) *Postgres {
 
 // EnsureSchema creates minimal tables for rides and drivers if they do not exist.
 func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `SELECT 1`)
-	return err
+	return ApplySchema(ctx, pool)
 }
 
 func (p *Postgres) SaveDriver(d dispatch.DriverState) error {

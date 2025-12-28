@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 )
 
 // InMemoryGeo provides a simple fallback geo index.
@@ -42,6 +43,10 @@ func (g *InMemoryGeo) Remove(driverID string) error {
 	delete(g.coords, driverID)
 	g.mu.Unlock()
 	return nil
+}
+
+func (g *InMemoryGeo) PruneOlderThan(cutoff time.Time) {
+	// in-memory geo lacks timestamps; no-op
 }
 
 func (g *InMemoryGeo) Nearby(lat, lon, radiusKM float64) (string, float64, error) {

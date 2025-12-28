@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,8 +17,17 @@ import (
 // AttachRoutes wires HTTP routes to handlers.
 func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration, eventLogger dispatch.EventLogger, rideLister dispatch.RideLister) {
 	authCfg := newAuthConfig(authStore, identityDB, defaultTTL)
-	handler := &Handler{store: store, hub: hub, auth: authCfg, events: eventLogger, db: rideLister}
+	handler := &Handler{
+		store:     store,
+		hub:       hub,
+		auth:      authCfg,
+		events:    eventLogger,
+		db:        rideLister,
+		startTime: time.Now(),
+		staleTTL:  parseDurationEnv("DRIVER_TTL", "5m"),
+	}
 
+	r.Use(handler.metricsMiddleware)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 
@@ -44,6 +54,8 @@ func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authSt
 		pr.Get("/api/admin/rides/{rideID}/events", handler.ListRideEvents)
 	})
 
+	r.Get("/metrics", handler.Metrics)
+
 	r.Group(func(pr chi.Router) {
 		pr.Use(authCfg.middleware)
 		fileServer := http.StripPrefix("/admin", http.FileServer(http.Dir("./static/admin")))
@@ -65,4 +77,16 @@ func respondJSON(w http.ResponseWriter, status int, body any) {
 
 func respondError(w http.ResponseWriter, status int, msg string) {
 	respondJSON(w, status, map[string]string{"error": msg})
+}
+
+func parseDurationEnv(key, def string) time.Duration {
+	val := os.Getenv(key)
+	if val == "" {
+		val = def
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return 0
+	}
+	return d
 }

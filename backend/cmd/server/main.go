@@ -1,21 +1,22 @@
 package main
 
 import (
-	"context"
-	"log"
-	"net/http"
-	"os"
-	"time"
+    "context"
+    "log"
+    "net/http"
+    "os"
+    "time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
-	"github.com/redis/go-redis/v9"
+    "github.com/go-chi/chi/v5"
+    "github.com/go-chi/chi/v5/middleware"
+    "github.com/go-chi/cors"
+    "github.com/redis/go-redis/v9"
 
-	"turbodriver/internal/api"
-	"turbodriver/internal/auth"
-	"turbodriver/internal/dispatch"
-	"turbodriver/internal/geo"
-	"turbodriver/internal/storage"
+    "turbodriver/internal/api"
+    "turbodriver/internal/auth"
+    "turbodriver/internal/dispatch"
+    "turbodriver/internal/geo"
+    "turbodriver/internal/storage"
 )
 
 func main() {
@@ -27,6 +28,8 @@ func main() {
 	go startDriverPrune(store)
 
 	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Logger)
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -80,12 +83,12 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			log.Printf("database connection failed, falling back to in-memory: %v", err)
 		} else if err := storage.EnsureSchema(ctx, pool); err != nil {
 			log.Printf("schema init failed, falling back to in-memory: %v", err)
-		} else {
-			log.Printf("using PostgreSQL persistence")
-			pg := storage.NewPostgres(pool)
-			persist = pg
-			events = pg
-			rideLst = pg
+			} else {
+				log.Printf("using PostgreSQL persistence")
+				pg := storage.NewPostgres(pool)
+				persist = pg
+				events = pg
+				rideLst = pg
 			idDB = storage.NewIdentityStore(pool)
 			if err := idDB.EnsureSchema(ctx); err != nil {
 				log.Printf("identity schema init failed: %v", err)
@@ -161,3 +164,4 @@ func (r redisGeoLocator) Add(driverID string, lat, lon float64) error {
 func (r redisGeoLocator) Remove(driverID string) error {
 	return r.idx.RemoveDriver(context.Background(), driverID)
 }
+func (r redisGeoLocator) PruneOlderThan(cutoff time.Time) {}

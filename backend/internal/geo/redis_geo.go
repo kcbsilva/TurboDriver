@@ -3,6 +3,7 @@ package geo
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -30,6 +31,9 @@ func (i *Index) AddDriver(ctx context.Context, driverID string, lat, lon float64
 func (i *Index) RemoveDriver(ctx context.Context, driverID string) error {
 	return i.client.ZRem(ctx, i.key, driverID).Err()
 }
+
+// PruneOlderThan is a no-op for Redis GEO; rely on heartbeat TTL in Store.
+func (i *Index) PruneOlderThan(cutoff time.Time) {}
 
 // Nearby finds the nearest driver within radius km.
 func (i *Index) Nearby(ctx context.Context, lat, lon, radiusKM float64) (string, float64, error) {

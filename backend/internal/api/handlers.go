@@ -3,8 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"runtime"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -79,6 +82,17 @@ type Handler struct {
 	auth   authConfig
 	events dispatch.EventLogger
 	db     dispatch.RideLister
+
+	eventsLogged  int64
+	rideStarts    int64
+	rideAccepts   int64
+	rideCancels   int64
+	rideCompletes int64
+	startTime     time.Time
+	reqCount      int64
+	reqErrors     int64
+	reqLatencyNS  int64
+	staleTTL      time.Duration
 }
 
 type driverLocationPayload struct {
@@ -162,6 +176,7 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 		"driverId":    ride.DriverID,
 		"statusTo":    ride.Status,
 	})
+	h.rideStarts++
 	go h.awaitAcceptance(ride.ID, ride.DriverID)
 	respondJSON(w, http.StatusAccepted, ride)
 }
@@ -204,6 +219,7 @@ func (h *Handler) AcceptRide(w http.ResponseWriter, r *http.Request) {
 		"statusFrom": prevStatus,
 		"statusTo":   ride.Status,
 	})
+	h.rideAccepts++
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -227,6 +243,7 @@ func (h *Handler) CancelRide(w http.ResponseWriter, r *http.Request) {
 		"statusFrom": prevStatus,
 		"statusTo":   ride.Status,
 	})
+	h.rideCancels++
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -250,6 +267,7 @@ func (h *Handler) CompleteRide(w http.ResponseWriter, r *http.Request) {
 		"statusFrom": prevStatus,
 		"statusTo":   ride.Status,
 	})
+	h.rideCompletes++
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -427,6 +445,65 @@ func parseOffset(raw string) int {
 	return 0
 }
 
+// Metrics exposes a minimal Prometheus text endpoint.
+func (h *Handler) Metrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprintf(w, "turbodriver_events_logged %d\n", h.eventsLogged)
+	fmt.Fprintf(w, "turbodriver_ride_starts %d\n", h.rideStarts)
+	fmt.Fprintf(w, "turbodriver_ride_accepts %d\n", h.rideAccepts)
+	fmt.Fprintf(w, "turbodriver_ride_cancels %d\n", h.rideCancels)
+	fmt.Fprintf(w, "turbodriver_ride_completes %d\n", h.rideCompletes)
+	uptime := time.Since(h.startTime).Seconds()
+	fmt.Fprintf(w, "turbodriver_prunes %d\n", h.store.PruneCount())
+	total, available, stale := h.store.SnapshotDrivers(h.staleTTL)
+	fmt.Fprintf(w, "turbodriver_drivers_available %d\n", available)
+	fmt.Fprintf(w, "turbodriver_drivers_stale_current %d\n", stale)
+	zeroAvail := 0
+	if available == 0 {
+		zeroAvail = 1
+	}
+	fmt.Fprintf(w, "turbodriver_drivers_zero_available %d\n", zeroAvail)
+	stalePct := 0.0
+	if total > 0 {
+		stalePct = float64(stale) / float64(total)
+	}
+	fmt.Fprintf(w, "turbodriver_drivers_stale_ratio %.4f\n", stalePct)
+	fmt.Fprintf(w, "turbodriver_uptime_seconds %.0f\n", uptime)
+	fmt.Fprintf(w, "turbodriver_goroutines %d\n", runtime.NumGoroutine())
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	fmt.Fprintf(w, "turbodriver_mem_alloc_bytes %d\n", m.Alloc)
+	fmt.Fprintf(w, "turbodriver_heap_objects %d\n", m.HeapObjects)
+	fmt.Fprintf(w, "turbodriver_requests_total %d\n", atomic.LoadInt64(&h.reqCount))
+	fmt.Fprintf(w, "turbodriver_request_errors_total %d\n", atomic.LoadInt64(&h.reqErrors))
+	latencySec := float64(atomic.LoadInt64(&h.reqLatencyNS)) / 1e9
+	fmt.Fprintf(w, "turbodriver_request_latency_seconds_total %.6f\n", latencySec)
+}
+
+// metricsMiddleware captures basic request metrics.
+func (h *Handler) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rec, r)
+		atomic.AddInt64(&h.reqCount, 1)
+		if rec.status >= 400 {
+			atomic.AddInt64(&h.reqErrors, 1)
+		}
+		atomic.AddInt64(&h.reqLatencyNS, time.Since(start).Nanoseconds())
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
 func (h *Handler) logRideEvent(ctx context.Context, ride dispatch.Ride, evtType string, payload map[string]any) {
 	if h.events == nil {
 		return
@@ -445,4 +522,5 @@ func (h *Handler) logRideEvent(ctx context.Context, ride dispatch.Ride, evtType 
 		ActorRole: actorRole,
 		CreatedAt: time.Now(),
 	})
+	h.eventsLogged++
 }

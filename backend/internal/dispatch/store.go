@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type Store struct {
 	persistence Persistence
 	geo         GeoLocator
 	tx          RideTransaction
+	pruneCount  int64
+	lastPruned  int64
+	staleCount  int64
 }
 
 func NewStore() *Store {
@@ -37,6 +41,7 @@ type GeoLocator interface {
 	Nearby(lat, lon, radiusKM float64) (string, float64, error)
 	Add(driverID string, lat, lon float64) error
 	Remove(driverID string) error
+	PruneOlderThan(cutoff time.Time)
 }
 
 func NewStoreWithPersistence(p Persistence) *Store {
@@ -290,7 +295,15 @@ func (s *Store) persistRideAndDriverTx(ride Ride, driver DriverState, evt string
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		// On creation, UpdateRideWithEvent will still upsert status.
+		if evt == "ride_assigned" && payload["statusFrom"] == nil {
+			_ = s.tx.CreateRideWithEvent(ctx, ride, RideEvent{
+				RideID:    ride.ID,
+				Type:      evt,
+				Payload:   body,
+				CreatedAt: time.Now(),
+			}, driver)
+			return
+		}
 		_ = s.tx.UpdateRideWithEvent(ctx, ride, RideEvent{
 			RideID:    ride.ID,
 			Type:      evt,
@@ -307,14 +320,59 @@ func (s *Store) PruneStaleDrivers(ttl time.Duration) {
 	cutoff := time.Now().Add(-ttl)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var removed int64
+	var stale int64
 	for id, driver := range s.drivers {
 		if driver.UpdatedAt.Before(cutoff) && driver.RideID == "" {
 			delete(s.drivers, id)
 			if s.geo != nil {
 				_ = s.geo.Remove(id)
+				s.geo.PruneOlderThan(cutoff)
 			}
+			removed++
+		}
+		if driver.UpdatedAt.Before(cutoff) {
+			stale++
 		}
 	}
+	if removed > 0 {
+		atomic.AddInt64(&s.pruneCount, removed)
+	}
+	atomic.StoreInt64(&s.lastPruned, removed)
+	atomic.StoreInt64(&s.staleCount, stale)
+}
+
+// PruneCount returns number of drivers pruned since start.
+func (s *Store) PruneCount() int64 {
+	return atomic.LoadInt64(&s.pruneCount)
+}
+
+// LastPruned returns drivers removed in last prune cycle.
+func (s *Store) LastPruned() int64 {
+	return atomic.LoadInt64(&s.lastPruned)
+}
+
+// StaleCount returns drivers whose heartbeat is older than TTL.
+func (s *Store) StaleCount() int64 {
+	return atomic.LoadInt64(&s.staleCount)
+}
+
+// SnapshotDrivers returns counts of total, available, and stale (older than ttl).
+func (s *Store) SnapshotDrivers(ttl time.Duration) (int, int, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total, available, stale int
+	cutoff := time.Now().Add(-ttl)
+	for _, d := range s.drivers {
+		total++
+		if d.Available {
+			available++
+		}
+		if ttl > 0 && d.UpdatedAt.Before(cutoff) {
+			stale++
+		}
+	}
+	return total, available, stale
 }
 
 // ReassignIfUnaccepted frees the current driver and attempts to reassign if still unaccepted.

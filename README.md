@@ -265,6 +265,26 @@ cd backend
 go run ./cmd/serve-admin --addr=:8090
 ```
 
+### Metrics
+
+Prometheus text endpoint at `/metrics` (API server) with counters:
+- `turbodriver_events_logged`
+- `turbodriver_ride_starts`
+- `turbodriver_ride_accepts`
+- `turbodriver_ride_cancels`
+- `turbodriver_ride_completes`
+- `turbodriver_prunes`
+- `turbodriver_stale_drivers`
+- `turbodriver_drivers_zero_available`
+- `turbodriver_drivers_stale_ratio`
+- `turbodriver_uptime_seconds`
+- `turbodriver_goroutines`
+- `turbodriver_mem_alloc_bytes`
+- `turbodriver_heap_objects`
+- `turbodriver_requests_total`
+- `turbodriver_request_errors_total`
+- `turbodriver_request_latency_seconds_total`
+
 ### HTTP & WebSocket Surface (MVP)
 
 - `GET /health` – readiness probe.
