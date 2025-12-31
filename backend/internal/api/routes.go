@@ -15,7 +15,7 @@ import (
 )
 
 // AttachRoutes wires HTTP routes to handlers.
-func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration, eventLogger dispatch.EventLogger, rideLister dispatch.RideLister) {
+func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration, eventLogger dispatch.EventLogger, rideLister dispatch.RideLister, apps ApplicationStore) {
 	signupSecret := os.Getenv("SIGNUP_SECRET")
 	allowSignup := os.Getenv("ALLOW_SIGNUP") == "true"
 	authCfg := newAuthConfig(authStore, identityDB, defaultTTL, signupSecret, allowSignup)
@@ -25,6 +25,7 @@ func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authSt
 		auth:          authCfg,
 		events:        eventLogger,
 		db:            rideLister,
+		apps:          apps,
 		startTime:     time.Now(),
 		staleTTL:      parseDurationEnv("DRIVER_TTL", "5m"),
 		matchBuckets:  newBucketCounter(map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0}),
@@ -52,12 +53,20 @@ func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authSt
 		pr.Post("/api/rides/{rideID}/accept", handler.AcceptRide)
 		pr.Post("/api/rides/{rideID}/cancel", handler.CancelRide)
 		pr.Post("/api/rides/{rideID}/complete", handler.CompleteRide)
+		pr.Post("/api/drivers/{driverID}/application", handler.SubmitDriverApplication)
+		pr.Get("/api/drivers/{driverID}/application", handler.GetDriverApplication)
+		pr.Post("/api/passengers/{passengerID}/profile", handler.UpsertPassengerProfile)
+		pr.Get("/api/passengers/{passengerID}/profile", handler.GetPassengerProfile)
+		pr.Post("/api/rides/{rideID}/rating", handler.RateRide)
+		pr.Get("/api/drivers/{driverID}/ratings", handler.GetRatingsForDriver)
+		pr.Get("/api/passengers/{passengerID}/ratings", handler.GetRatingsForPassenger)
 	})
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(authCfg.middleware)
 		pr.Post("/api/auth/register", handler.RegisterIdentity)
 		pr.Get("/api/admin/rides/{rideID}/events", handler.ListRideEvents)
+		pr.Patch("/api/admin/drivers/{driverID}/application", handler.UpdateApplicationStatus)
 	})
 
 	r.Get("/metrics", handler.Metrics)

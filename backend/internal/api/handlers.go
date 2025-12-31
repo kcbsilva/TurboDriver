@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -77,12 +78,30 @@ func canAccessRideWithIdentity(id dispatch.Identity, ride dispatch.Ride) bool {
 	return false
 }
 
+// ApplicationStore captures persistence for driver applications/profiles.
+type ApplicationStore interface {
+	UpsertDriverApplication(ctx context.Context, app dispatch.DriverApplication) (int64, error)
+	GetDriverApplication(ctx context.Context, driverID string) (dispatch.DriverApplication, bool, error)
+	UpdateApplicationStatus(ctx context.Context, driverID string, status dispatch.DriverApplicationStatus) error
+	UpsertDriverLicense(ctx context.Context, lic dispatch.DriverLicense) (int64, error)
+	UpsertDriverVehicle(ctx context.Context, veh dispatch.DriverVehicle) (int64, error)
+	ReplaceVehiclePhotos(ctx context.Context, vehicleID int64, photos []dispatch.VehiclePhoto) error
+	UpsertLiveness(ctx context.Context, liv dispatch.DriverLiveness) (int64, error)
+	LoadApplicationDetails(ctx context.Context, driverID string) (dispatch.DriverApplication, bool, error)
+	UpsertPassengerProfile(ctx context.Context, prof dispatch.PassengerProfile) (int64, error)
+	GetPassengerProfile(ctx context.Context, passengerID string) (dispatch.PassengerProfile, bool, error)
+	UpsertRating(ctx context.Context, r dispatch.Rating) error
+	GetRatingsForRide(ctx context.Context, rideID string) ([]dispatch.Rating, error)
+	GetRatingsForProfile(ctx context.Context, profileID string) ([]dispatch.Rating, error)
+}
+
 type Handler struct {
 	store  *dispatch.Store
 	hub    *dispatch.Hub
 	auth   authConfig
 	events dispatch.EventLogger
 	db     dispatch.RideLister
+	apps   ApplicationStore
 
 	eventsLogged    int64
 	rideStarts      int64
@@ -530,6 +549,504 @@ func parseOffset(raw string) int {
 		return v
 	}
 	return 0
+}
+
+// Driver application submission
+
+type applicationPayload struct {
+	LocationCode   string   `json:"locationCode"`
+	RulesVersionID *int64   `json:"rulesVersionId,omitempty"`
+	License        licBody  `json:"license"`
+	Vehicle        vehBody  `json:"vehicle"`
+	Photos         []photo  `json:"photos"`
+	Liveness       liveBody `json:"liveness"`
+}
+
+type licBody struct {
+	Number      string `json:"number"`
+	Country     string `json:"country,omitempty"`
+	Region      string `json:"region,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
+	Remunerated bool   `json:"remunerated"`
+	DocumentURL string `json:"documentUrl,omitempty"`
+}
+
+type vehBody struct {
+	Type            string `json:"type"`
+	PlateNumber     string `json:"plateNumber,omitempty"`
+	DocumentNumber  string `json:"documentNumber,omitempty"`
+	DocumentURL     string `json:"documentUrl,omitempty"`
+	DocumentExpires string `json:"documentExpiresAt,omitempty"`
+	Ownership       string `json:"ownership"`
+	ContractURL     string `json:"contractUrl,omitempty"`
+	ContractExpires string `json:"contractExpiresAt,omitempty"`
+}
+
+type photo struct {
+	Angle    string `json:"angle"`
+	PhotoURL string `json:"photoUrl"`
+}
+
+type liveBody struct {
+	ChallengeSequence []string          `json:"challengeSequence"`
+	Captures          map[string]string `json:"captures"`
+}
+
+func (h *Handler) SubmitDriverApplication(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "application store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, dispatch.RoleDriver, dispatch.RoleAdmin) {
+		return
+	}
+	driverID := chi.URLParam(r, "driverID")
+	if !matchIdentity(w, r, enforce, driverID) {
+		return
+	}
+
+	var payload applicationPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if payload.LocationCode == "" || payload.License.Number == "" {
+		respondError(w, http.StatusBadRequest, "locationCode and license.number are required")
+		return
+	}
+	if err := validateVehicle(payload.Vehicle); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validatePhotos(payload.Photos); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateLiveness(payload.Liveness); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	// License
+	lic := dispatch.DriverLicense{
+		DriverID:    driverID,
+		Number:      payload.License.Number,
+		Country:     payload.License.Country,
+		Region:      payload.License.Region,
+		Remunerated: payload.License.Remunerated,
+		DocumentURL: payload.License.DocumentURL,
+	}
+	if t := parseOptionalTime(payload.License.ExpiresAt); t != nil {
+		lic.ExpiresAt = t
+	}
+	if _, err := h.apps.UpsertDriverLicense(ctx, lic); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save license")
+		return
+	}
+
+	// Vehicle
+	veh := dispatch.DriverVehicle{
+		DriverID:       driverID,
+		Type:           strings.ToLower(payload.Vehicle.Type),
+		PlateNumber:    payload.Vehicle.PlateNumber,
+		DocumentNumber: payload.Vehicle.DocumentNumber,
+		DocumentURL:    payload.Vehicle.DocumentURL,
+		Ownership:      strings.ToLower(payload.Vehicle.Ownership),
+		ContractURL:    payload.Vehicle.ContractURL,
+	}
+	if t := parseOptionalTime(payload.Vehicle.DocumentExpires); t != nil {
+		veh.DocumentExpires = t
+	}
+	if t := parseOptionalTime(payload.Vehicle.ContractExpires); t != nil {
+		veh.ContractExpires = t
+	}
+	vehID, err := h.apps.UpsertDriverVehicle(ctx, veh)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save vehicle")
+		return
+	}
+
+	// Photos
+	var photos []dispatch.VehiclePhoto
+	for _, p := range payload.Photos {
+		photos = append(photos, dispatch.VehiclePhoto{
+			VehicleID: vehID,
+			Angle:     strings.ToLower(p.Angle),
+			PhotoURL:  p.PhotoURL,
+		})
+	}
+	if len(photos) > 0 {
+		if err := h.apps.ReplaceVehiclePhotos(ctx, vehID, photos); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to save photos")
+			return
+		}
+	}
+
+	// Liveness
+	capturesJSON, _ := json.Marshal(payload.Liveness.Captures)
+	liv := dispatch.DriverLiveness{
+		DriverID:          driverID,
+		ChallengeSequence: payload.Liveness.ChallengeSequence,
+		Captures:          capturesJSON,
+		Verified:          false,
+	}
+	if _, err := h.apps.UpsertLiveness(ctx, liv); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save liveness")
+		return
+	}
+
+	// Application record
+	app := dispatch.DriverApplication{
+		DriverID:     driverID,
+		LocationCode: payload.LocationCode,
+		RulesVersion: payload.RulesVersionID,
+		Status:       dispatch.ApplicationPending,
+	}
+	if _, err := h.apps.UpsertDriverApplication(ctx, app); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save application")
+		return
+	}
+
+	full, ok, err := h.apps.LoadApplicationDetails(ctx, driverID)
+	if err != nil || !ok {
+		respondError(w, http.StatusInternalServerError, "failed to load application")
+		return
+	}
+	respondJSON(w, http.StatusOK, full)
+}
+
+func (h *Handler) GetDriverApplication(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "application store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, dispatch.RoleDriver, dispatch.RoleAdmin) {
+		return
+	}
+	driverID := chi.URLParam(r, "driverID")
+	if !matchIdentity(w, r, enforce, driverID) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	app, ok, err := h.apps.LoadApplicationDetails(ctx, driverID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load application")
+		return
+	}
+	if !ok {
+		respondError(w, http.StatusNotFound, "application not found")
+		return
+	}
+	respondJSON(w, http.StatusOK, app)
+}
+
+func (h *Handler) UpdateApplicationStatus(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "application store unavailable")
+		return
+	}
+	if !requireRole(w, r, true, dispatch.RoleAdmin) {
+		return
+	}
+	driverID := chi.URLParam(r, "driverID")
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	newStatus := dispatch.DriverApplicationStatus(strings.ToLower(body.Status))
+	switch newStatus {
+	case dispatch.ApplicationPending, dispatch.ApplicationApproved, dispatch.ApplicationRejected, dispatch.ApplicationNeedsReview:
+	default:
+		respondError(w, http.StatusBadRequest, "invalid status")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := h.apps.UpdateApplicationStatus(ctx, driverID, newStatus); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update status")
+		return
+	}
+	app, ok, err := h.apps.LoadApplicationDetails(ctx, driverID)
+	if err != nil || !ok {
+		respondJSON(w, http.StatusOK, map[string]string{"status": string(newStatus)})
+		return
+	}
+	app.Status = newStatus
+	respondJSON(w, http.StatusOK, app)
+}
+
+// Passenger profile
+
+func (h *Handler) UpsertPassengerProfile(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "profile store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, dispatch.RolePassenger, dispatch.RoleAdmin) {
+		return
+	}
+	pid := chi.URLParam(r, "passengerID")
+	if !matchIdentity(w, r, enforce, pid) {
+		return
+	}
+	var body struct {
+		FullName     string `json:"fullName"`
+		Address      string `json:"address,omitempty"`
+		GovernmentID string `json:"governmentId,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if body.FullName == "" {
+		respondError(w, http.StatusBadRequest, "fullName required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	prof := dispatch.PassengerProfile{
+		PassengerID:  pid,
+		FullName:     body.FullName,
+		Address:      body.Address,
+		GovernmentID: body.GovernmentID,
+	}
+	if _, err := h.apps.UpsertPassengerProfile(ctx, prof); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save profile")
+		return
+	}
+	saved, ok, err := h.apps.GetPassengerProfile(ctx, pid)
+	if err != nil || !ok {
+		respondError(w, http.StatusInternalServerError, "failed to read profile")
+		return
+	}
+	respondJSON(w, http.StatusOK, saved)
+}
+
+func (h *Handler) GetPassengerProfile(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "profile store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, dispatch.RolePassenger, dispatch.RoleAdmin) {
+		return
+	}
+	pid := chi.URLParam(r, "passengerID")
+	if !matchIdentity(w, r, enforce, pid) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	prof, ok, err := h.apps.GetPassengerProfile(ctx, pid)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to read profile")
+		return
+	}
+	if !ok {
+		respondError(w, http.StatusNotFound, "profile not found")
+		return
+	}
+	respondJSON(w, http.StatusOK, prof)
+}
+
+// RateRide allows passenger and driver to rate each other (1-5 stars).
+func (h *Handler) RateRide(w http.ResponseWriter, r *http.Request) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "rating store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, dispatch.RolePassenger, dispatch.RoleDriver, dispatch.RoleAdmin) {
+		return
+	}
+	rideID := chi.URLParam(r, "rideID")
+	ride, ok := h.store.GetRide(rideID)
+	if !ok {
+		respondError(w, http.StatusNotFound, "ride not found")
+		return
+	}
+	id, _ := identityFromContext(r.Context())
+	var body struct {
+		Stars   int    `json:"stars"`
+		Comment string `json:"comment,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if body.Stars < 1 || body.Stars > 5 {
+		respondError(w, http.StatusBadRequest, "stars must be 1-5")
+		return
+	}
+	if body.Stars <= 3 && strings.TrimSpace(body.Comment) == "" {
+		respondError(w, http.StatusBadRequest, "comment required for 3 stars or less")
+		return
+	}
+	var rating dispatch.Rating
+	rating.RideID = rideID
+	rating.Stars = body.Stars
+	rating.Comment = body.Comment
+	rating.RequiresAttention = body.Stars <= 3
+
+	switch id.Role {
+	case dispatch.RolePassenger:
+		if ride.PassengerID != id.ID {
+			respondError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		if ride.DriverID == "" {
+			respondError(w, http.StatusBadRequest, "ride missing driver")
+			return
+		}
+		rating.RaterRole = dispatch.RolePassenger
+		rating.RaterID = id.ID
+		rating.RateeID = ride.DriverID
+	case dispatch.RoleDriver:
+		if ride.DriverID != id.ID {
+			respondError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		rating.RaterRole = dispatch.RoleDriver
+		rating.RaterID = id.ID
+		rating.RateeID = ride.PassengerID
+	case dispatch.RoleAdmin:
+		respondError(w, http.StatusForbidden, "admin cannot rate")
+		return
+	default:
+		respondError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.apps.UpsertRating(ctx, rating); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to save rating")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"stars": rating.Stars})
+}
+
+func (h *Handler) GetRatingsForDriver(w http.ResponseWriter, r *http.Request) {
+	h.getRatingsForProfile(w, r, dispatch.RoleDriver)
+}
+
+func (h *Handler) GetRatingsForPassenger(w http.ResponseWriter, r *http.Request) {
+	h.getRatingsForProfile(w, r, dispatch.RolePassenger)
+}
+
+func (h *Handler) getRatingsForProfile(w http.ResponseWriter, r *http.Request, role dispatch.IdentityRole) {
+	if h.apps == nil {
+		respondError(w, http.StatusServiceUnavailable, "rating store unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, role, dispatch.RoleAdmin) {
+		return
+	}
+	var id string
+	if role == dispatch.RoleDriver {
+		id = chi.URLParam(r, "driverID")
+	} else {
+		id = chi.URLParam(r, "passengerID")
+	}
+	if !matchIdentity(w, r, enforce, id) && !(enforce && isAdmin(r)) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	ratings, err := h.apps.GetRatingsForProfile(ctx, id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch ratings")
+		return
+	}
+	var sum int
+	for _, rt := range ratings {
+		sum += rt.Stars
+	}
+	avg := 0.0
+	if len(ratings) > 0 {
+		avg = float64(sum) / float64(len(ratings))
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"average": avg,
+		"count":   len(ratings),
+		"data":    ratings,
+	})
+}
+
+func isAdmin(r *http.Request) bool {
+	id, ok := identityFromContext(r.Context())
+	return ok && id.Role == dispatch.RoleAdmin
+}
+
+func validateVehicle(v vehBody) error {
+	vt := strings.ToLower(v.Type)
+	if vt != "car" && vt != "motorcycle" && vt != "bus" {
+		return fmt.Errorf("vehicle.type must be car, motorcycle, or bus")
+	}
+	own := strings.ToLower(v.Ownership)
+	if own != "owns" && own != "renting" && own != "lent" {
+		return fmt.Errorf("vehicle.ownership must be owns, renting, or lent")
+	}
+	if (own == "renting" || own == "lent") && v.ContractURL == "" {
+		return fmt.Errorf("vehicle.contractUrl required when ownership is renting or lent")
+	}
+	return nil
+}
+
+func validatePhotos(ph []photo) error {
+	required := map[string]bool{"front": false, "back": false, "left": false, "right": false}
+	for _, p := range ph {
+		angle := strings.ToLower(p.Angle)
+		if _, ok := required[angle]; ok {
+			required[angle] = true
+		}
+	}
+	for angle, ok := range required {
+		if !ok {
+			return fmt.Errorf("missing vehicle photo angle: %s", angle)
+		}
+	}
+	return nil
+}
+
+func validateLiveness(l liveBody) error {
+	if len(l.ChallengeSequence) == 0 {
+		return fmt.Errorf("liveness.challengeSequence required")
+	}
+	required := map[string]bool{"up": false, "down": false, "left": false, "right": false}
+	for _, dir := range l.ChallengeSequence {
+		if _, ok := required[strings.ToLower(dir)]; ok {
+			required[strings.ToLower(dir)] = true
+		}
+	}
+	for dir := range required {
+		if _, ok := l.Captures[dir]; !ok {
+			return fmt.Errorf("liveness.captures missing direction: %s", dir)
+		}
+	}
+	return nil
+}
+
+func parseOptionalTime(val string) *time.Time {
+	if val == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, val)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 // Metrics exposes a minimal Prometheus text endpoint.

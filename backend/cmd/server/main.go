@@ -23,7 +23,7 @@ func main() {
 	addr := envOrDefault("HTTP_ADDR", ":8080")
 	env := envOrDefault("ENV", "dev")
 
-	store, authStore, identityDB, authTTL, eventLogger, rideLister := initStore(env)
+	store, authStore, identityDB, authTTL, eventLogger, rideLister, appStore := initStore(env)
 	hub := dispatch.NewHub()
 	go hub.Run()
 	go startDriverPrune(store)
@@ -50,7 +50,7 @@ func main() {
 		w.Write([]byte("ready"))
 	})
 
-	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL, eventLogger, rideLister)
+	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL, eventLogger, rideLister, appStore)
 
 	server := &http.Server{
 		Addr:              addr,
@@ -71,7 +71,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration, storage.EventLogger, dispatch.RideLister) {
+func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration, storage.EventLogger, dispatch.RideLister, api.ApplicationStore) {
 	dbURL := os.Getenv("DATABASE_URL")
 	redisURL := envOrDefault("REDIS_URL", "redis://redis:6379")
 	authEnabled := envOrDefault("AUTH_MODE", "memory")
@@ -82,15 +82,16 @@ func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.Ident
 	defer cancel()
 
 	var (
-		persist dispatch.Persistence
-		geoLoc  dispatch.GeoLocator = geo.NewInMemoryGeo()
-		authMem *auth.InMemoryStore
-		idDB    *storage.IdentityStore
-		events  storage.EventLogger
-		rideLst dispatch.RideLister
-		idemDB  *storage.IdempotencyStore
-		dbPing  func(context.Context) error
-		redisFn func(context.Context) error
+		persist  dispatch.Persistence
+		geoLoc   dispatch.GeoLocator = geo.NewInMemoryGeo()
+		authMem  *auth.InMemoryStore
+		idDB     *storage.IdentityStore
+		events   storage.EventLogger
+		rideLst  dispatch.RideLister
+		idemDB   *storage.IdempotencyStore
+		dbPing   func(context.Context) error
+		redisFn  func(context.Context) error
+		appStore api.ApplicationStore
 	)
 
 	if dbURL != "" {
@@ -111,6 +112,7 @@ func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.Ident
 			persist = pg
 			events = pg
 			rideLst = pg
+			appStore = pg
 			idDB = storage.NewIdentityStore(pool)
 			if err := idDB.EnsureSchema(ctx); err != nil {
 				log.Printf("identity schema init failed: %v", err)
@@ -166,7 +168,7 @@ func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.Ident
 			log.Fatal("SIGNUP_SECRET required when ALLOW_SIGNUP=true in prod")
 		}
 	}
-	return store, authMem, idDB, authTTL, events, rideLst
+	return store, authMem, idDB, authTTL, events, rideLst, appStore
 }
 
 func parseDuration(val string) time.Duration {

@@ -90,3 +90,107 @@ type RideLister interface {
 	CountRidesByPassenger(ctx context.Context, passengerID string) (int, error)
 	CountRidesByDriver(ctx context.Context, driverID string) (int, error)
 }
+
+// Driver application domain
+
+type DriverApplicationStatus string
+
+const (
+	ApplicationPending     DriverApplicationStatus = "pending"
+	ApplicationApproved    DriverApplicationStatus = "approved"
+	ApplicationRejected    DriverApplicationStatus = "rejected"
+	ApplicationNeedsReview DriverApplicationStatus = "needs_review"
+)
+
+type LocationRule struct {
+	ID           int64     `json:"id"`
+	LocationCode string    `json:"locationCode"`
+	Name         string    `json:"name"`
+	Rules        []byte    `json:"rules"` // JSON blob
+	EffectiveAt  time.Time `json:"effectiveAt"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+type DriverApplication struct {
+	ID           int64                   `json:"id"`
+	DriverID     string                  `json:"driverId"`
+	LocationCode string                  `json:"locationCode"`
+	RulesVersion *int64                  `json:"rulesVersion,omitempty"`
+	Status       DriverApplicationStatus `json:"status"`
+	License      DriverLicense           `json:"license"`
+	Vehicle      DriverVehicle           `json:"vehicle"`
+	Photos       []VehiclePhoto          `json:"photos,omitempty"`
+	Liveness     DriverLiveness          `json:"liveness"`
+	CreatedAt    time.Time               `json:"createdAt"`
+	UpdatedAt    time.Time               `json:"updatedAt"`
+}
+
+type DriverLicense struct {
+	ID          int64      `json:"id"`
+	DriverID    string     `json:"driverId"`
+	Number      string     `json:"number"`
+	Country     string     `json:"country,omitempty"`
+	Region      string     `json:"region,omitempty"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+	Remunerated bool       `json:"remunerated"`
+	DocumentURL string     `json:"documentUrl,omitempty"`
+	VerifiedAt  *time.Time `json:"verifiedAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+}
+
+type DriverVehicle struct {
+	ID              int64      `json:"id"`
+	DriverID        string     `json:"driverId"`
+	Type            string     `json:"type"` // car | motorcycle | bus
+	PlateNumber     string     `json:"plateNumber,omitempty"`
+	DocumentNumber  string     `json:"documentNumber,omitempty"`
+	DocumentURL     string     `json:"documentUrl,omitempty"`
+	DocumentExpires *time.Time `json:"documentExpiresAt,omitempty"`
+	Ownership       string     `json:"ownership"` // owns | renting | lent
+	ContractURL     string     `json:"contractUrl,omitempty"`
+	ContractExpires *time.Time `json:"contractExpiresAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
+}
+
+type VehiclePhoto struct {
+	ID        int64     `json:"id"`
+	VehicleID int64     `json:"vehicleId"`
+	Angle     string    `json:"angle"` // front | back | left | right
+	PhotoURL  string    `json:"photoUrl"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type DriverLiveness struct {
+	ID                int64      `json:"id"`
+	DriverID          string     `json:"driverId"`
+	ChallengeSequence []string   `json:"challengeSequence"`
+	Captures          []byte     `json:"captures"` // JSON map direction -> photo URL
+	Verified          bool       `json:"verified"`
+	VerifiedAt        *time.Time `json:"verifiedAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+}
+
+// Passenger profile
+type PassengerProfile struct {
+	ID           int64     `json:"id"`
+	PassengerID  string    `json:"passengerId"`
+	FullName     string    `json:"fullName"`
+	Address      string    `json:"address,omitempty"`
+	GovernmentID string    `json:"governmentId,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type Rating struct {
+	ID                int64        `json:"id"`
+	RideID            string       `json:"rideId"`
+	RaterRole         IdentityRole `json:"raterRole"` // driver or passenger
+	RaterID           string       `json:"raterId"`
+	RateeID           string       `json:"rateeId"`
+	Stars             int          `json:"stars"` // 1-5
+	Comment           string       `json:"comment,omitempty"`
+	RequiresAttention bool         `json:"requiresAttention"`
+	CreatedAt         time.Time    `json:"createdAt"`
+}

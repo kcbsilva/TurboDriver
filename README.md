@@ -272,6 +272,16 @@ cd backend
 go run ./cmd/serve-admin --addr=:8090
 ```
 
+### Mobile Sandbox (React Native)
+
+- Minimal RN app lives in `mobile/` for smoke testing API + WebSocket (heartbeat, request ride, accept).
+- Install deps: `cd mobile && npm install`.
+- iOS native project is included; run `cd ios && pod install` once.
+- Run: start Metro `npx react-native start` (Terminal 1), then `npx react-native run-ios --simulator="iPhone 15"` (Terminal 2).
+- In-app, set API base `http://localhost:8080`, WS base `ws://localhost:8080`, and paste passenger/driver tokens from seed/signup; tap Heartbeat → Request → Accept to see the full flow and WS logs.
+- Driver onboarding screen: collect location, license (remunerated), vehicle/ownership, required vehicle photos (front/back/left/right), and liveness captures (up/down/left/right); posts to `/api/drivers/{driverID}/application` and shows status. Passenger profile screen uses `/api/passengers/{passengerID}/profile`.
+- Ratings: `POST /api/rides/{rideID}/rating` (driver↔passenger, 1–5 stars; ≤3 stars require a comment and are flagged). Fetch ratings + averages via `/api/drivers/{driverID}/ratings` and `/api/passengers/{passengerID}/ratings`.
+
 ### Metrics
 
 Prometheus text endpoint at `/metrics` (API server) with counters:
