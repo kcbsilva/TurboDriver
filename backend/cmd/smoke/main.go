@@ -55,7 +55,7 @@ func main() {
 	fmt.Printf("Ride ID: %s\n", rideID)
 
 	// subscribe to WS
-	events := make(chan string, 5)
+	events := make(chan map[string]any, 5)
 	go subscribeWS(wsBase, rideID, passToken, events)
 
 	// accept ride
@@ -66,12 +66,7 @@ func main() {
 		log.Fatalf("accept failed: %v", err)
 	}
 
-	select {
-	case msg := <-events:
-		fmt.Printf("WS update received: %s\n", msg)
-	case <-time.After(5 * time.Second):
-		log.Fatalf("no WS update received after acceptance")
-	}
+	waitForStatus(events, "accepted", rideID)
 
 	fmt.Println("Smoke test complete.")
 }
@@ -95,7 +90,11 @@ func requestRide(api, token string, payload map[string]any) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return "", err
 	}
-	id, _ := res["id"].(string)
+	idVal, ok := res["id"]
+	if !ok || idVal == nil {
+		return "", fmt.Errorf("ride id missing")
+	}
+	id, _ := idVal.(string)
 	if id == "" {
 		return "", fmt.Errorf("ride id missing")
 	}
@@ -135,7 +134,7 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-func subscribeWS(base, rideID, token string, sink chan<- string) {
+func subscribeWS(base, rideID, token string, sink chan<- map[string]any) {
 	u := fmt.Sprintf("%s/ws/rides/%s", base, rideID)
 	parsed, _ := url.Parse(u)
 	q := parsed.Query()
@@ -155,6 +154,35 @@ func subscribeWS(base, rideID, token string, sink chan<- string) {
 		if err != nil {
 			return
 		}
-		sink <- string(msg)
+		var payload map[string]any
+		if err := json.Unmarshal(msg, &payload); err != nil {
+			continue
+		}
+		sink <- payload
+	}
+}
+
+func waitForStatus(events <-chan map[string]any, expect, rideID string) {
+	timeout := time.After(8 * time.Second)
+	for {
+		select {
+		case msg := <-events:
+			status, _ := msg["status"].(string)
+			if status == "" {
+				continue
+			}
+			if id, ok := msg["id"].(string); ok && id != "" && rideID != "" && id != rideID {
+				continue
+			}
+			if driver, ok := msg["driverId"].(string); ok && driver == "" {
+				log.Fatalf("ws payload missing driverId: %v", msg)
+			}
+			fmt.Printf("WS update received: %v\n", msg)
+			if status == expect {
+				return
+			}
+		case <-timeout:
+			log.Fatalf("expected ws status %q not received", expect)
+		}
 	}
 }

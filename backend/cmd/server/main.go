@@ -21,8 +21,9 @@ import (
 
 func main() {
 	addr := envOrDefault("HTTP_ADDR", ":8080")
+	env := envOrDefault("ENV", "dev")
 
-	store, authStore, identityDB, authTTL, eventLogger, rideLister := initStore()
+	store, authStore, identityDB, authTTL, eventLogger, rideLister := initStore(env)
 	hub := dispatch.NewHub()
 	go hub.Run()
 	go startDriverPrune(store)
@@ -70,7 +71,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration, storage.EventLogger, dispatch.RideLister) {
+func initStore(env string) (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, time.Duration, storage.EventLogger, dispatch.RideLister) {
 	dbURL := os.Getenv("DATABASE_URL")
 	redisURL := envOrDefault("REDIS_URL", "redis://redis:6379")
 	authEnabled := envOrDefault("AUTH_MODE", "memory")
@@ -96,8 +97,14 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		pool, err := storage.DefaultPool(ctx, dbURL)
 		if err != nil {
 			log.Printf("database connection failed, falling back to in-memory: %v", err)
+			if env == "prod" {
+				log.Fatal("DATABASE_URL required in prod")
+			}
 		} else if err := storage.EnsureSchema(ctx, pool); err != nil {
 			log.Printf("schema init failed, falling back to in-memory: %v", err)
+			if env == "prod" {
+				log.Fatal("schema init required in prod")
+			}
 		} else {
 			log.Printf("using PostgreSQL persistence")
 			pg := storage.NewPostgres(pool)
@@ -124,6 +131,9 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			client := redis.NewClient(opt)
 			if err := client.Ping(ctx).Err(); err != nil {
 				log.Printf("redis unreachable, geo fallback to in-memory: %v", err)
+				if env == "prod" {
+					log.Fatal("redis reachable required in prod")
+				}
 			} else {
 				log.Printf("using Redis geo index")
 				geoLoc = redisGeoLocator{idx: geo.NewIndex(client)}
@@ -131,6 +141,9 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			}
 		} else {
 			log.Printf("redis URL parse error, geo fallback to in-memory: %v", err)
+			if env == "prod" {
+				log.Fatal("REDIS_URL parse failed in prod")
+			}
 		}
 	}
 
@@ -147,6 +160,12 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		store.AttachIdempotency(idemDB)
 	}
 	store.AttachHealth(dbPing, redisFn)
+
+	if env == "prod" {
+		if os.Getenv("ALLOW_SIGNUP") == "true" && os.Getenv("SIGNUP_SECRET") == "" {
+			log.Fatal("SIGNUP_SECRET required when ALLOW_SIGNUP=true in prod")
+		}
+	}
 	return store, authMem, idDB, authTTL, events, rideLst
 }
 
