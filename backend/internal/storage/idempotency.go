@@ -20,6 +20,10 @@ func NewIdempotencyStore(pool *pgxpool.Pool, ttl time.Duration) *IdempotencyStor
 	return &IdempotencyStore{pool: pool, ttl: ttl}
 }
 
+func (s *IdempotencyStore) TTL() time.Duration {
+	return s.ttl
+}
+
 func (s *IdempotencyStore) EnsureSchema(ctx context.Context) error {
 	_, err := s.pool.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS idempotency_keys (

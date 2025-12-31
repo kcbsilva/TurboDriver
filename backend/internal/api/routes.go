@@ -16,7 +16,9 @@ import (
 
 // AttachRoutes wires HTTP routes to handlers.
 func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration, eventLogger dispatch.EventLogger, rideLister dispatch.RideLister) {
-	authCfg := newAuthConfig(authStore, identityDB, defaultTTL)
+	signupSecret := os.Getenv("SIGNUP_SECRET")
+	allowSignup := os.Getenv("ALLOW_SIGNUP") == "true"
+	authCfg := newAuthConfig(authStore, identityDB, defaultTTL, signupSecret, allowSignup)
 	handler := &Handler{
 		store:         store,
 		hub:           hub,
@@ -25,8 +27,8 @@ func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authSt
 		db:            rideLister,
 		startTime:     time.Now(),
 		staleTTL:      parseDurationEnv("DRIVER_TTL", "5m"),
-		matchBuckets:  map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0},
-		acceptBuckets: map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0},
+		matchBuckets:  newBucketCounter(map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0}),
+		acceptBuckets: newBucketCounter(map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0}),
 	}
 
 	r.Use(handler.metricsMiddleware)

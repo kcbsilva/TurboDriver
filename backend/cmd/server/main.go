@@ -75,6 +75,7 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 	redisURL := envOrDefault("REDIS_URL", "redis://redis:6379")
 	authEnabled := envOrDefault("AUTH_MODE", "memory")
 	authTTL := parseDuration(envOrDefault("AUTH_TTL", "720h")) // default 30 days
+	idemTTL := parseDuration(envOrDefault("IDEMPOTENCY_TTL", "30m"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -108,7 +109,7 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 				log.Printf("identity schema init failed: %v", err)
 				idDB = nil
 			}
-			idemDB = storage.NewIdempotencyStore(pool, 30*time.Minute)
+			idemDB = storage.NewIdempotencyStore(pool, idemTTL)
 			if err := idemDB.EnsureSchema(ctx); err != nil {
 				log.Printf("idempotency schema init failed: %v", err)
 				idemDB = nil

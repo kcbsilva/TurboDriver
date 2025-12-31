@@ -73,6 +73,9 @@ func toRideTx(p Persistence) RideTransaction {
 // AttachIdempotency connects a persistent idempotency store.
 func (s *Store) AttachIdempotency(store IdempotencyStore) {
 	s.idemDB = store
+	if storeTTLProvider, ok := store.(interface{ TTL() time.Duration }); ok {
+		s.idemCache.SetTTL(storeTTLProvider.TTL())
+	}
 }
 
 // AttachHealth sets ping functions used by readiness checks.

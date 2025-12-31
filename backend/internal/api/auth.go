@@ -14,6 +14,8 @@ type authConfig struct {
 	store *auth.InMemoryStore
 	db    IdentityDB
 	ttl   time.Duration
+	signupSecret string
+	allowSignup  bool
 }
 
 type IdentityDB interface {
@@ -21,8 +23,8 @@ type IdentityDB interface {
 	Save(ctx context.Context, ident dispatch.Identity, ttl time.Duration) (dispatch.Identity, error)
 }
 
-func newAuthConfig(store *auth.InMemoryStore, db IdentityDB, ttl time.Duration) authConfig {
-	return authConfig{store: store, db: db, ttl: ttl}
+func newAuthConfig(store *auth.InMemoryStore, db IdentityDB, ttl time.Duration, signupSecret string, allowSignup bool) authConfig {
+	return authConfig{store: store, db: db, ttl: ttl, signupSecret: signupSecret, allowSignup: allowSignup}
 }
 
 func (a authConfig) middleware(next http.Handler) http.Handler {

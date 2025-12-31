@@ -309,6 +309,7 @@ Readiness: `/ready` checks DB/Redis connectivity and returns 503 if unavailable.
 
 - `GET /health` – readiness probe.
 - `POST /api/auth/signup` – issue a token for a role (`driver`/`passenger`/`admin`) without admin auth (pilot convenience).
+  - Set `SIGNUP_SECRET` to require `X-Signup-Secret` header; leave unset only in dev.
 - `POST /api/drivers/{driverID}/location` – driver GPS heartbeat (2–5s). Body: `{"latitude":..., "longitude":..., "accuracy":optional, "timestamp":optional_ms}`. Marks driver available unless on a ride; broadcasts to ride subscribers.
 - `POST /api/rides` – passenger ride request. Body: `{"passengerId":"p1","pickupLat":..., "pickupLong":..., "idempotencyKey":optional}`. Matches nearest available driver within 3km, sets status `assigned`, and broadcasts on the ride channel. When `idempotencyKey` is provided, repeated requests return the same ride.
   - Idempotency keys are cached in-memory and persisted to Postgres (TTL) when available.

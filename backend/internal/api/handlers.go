@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -96,8 +97,12 @@ type Handler struct {
 	staleTTL        time.Duration
 	matchLatencyNS  int64
 	acceptLatencyNS int64
-	matchBuckets    map[float64]int64
-	acceptBuckets   map[float64]int64
+	matchBuckets    bucketCounter
+	acceptBuckets   bucketCounter
+	matchCount      int64
+	matchSumNS      int64
+	acceptCount     int64
+	acceptSumNS     int64
 }
 
 type driverLocationPayload struct {
@@ -195,7 +200,9 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 		latency := time.Since(ride.CreatedAt)
 		if ride.Status == dispatch.RideAssigned {
 			atomic.AddInt64(&h.matchLatencyNS, latency.Nanoseconds())
-			h.observeBucket(h.matchBuckets, latency)
+			h.matchBuckets.observe(latency)
+			atomic.AddInt64(&h.matchCount, 1)
+			atomic.AddInt64(&h.matchSumNS, latency.Nanoseconds())
 		}
 	}
 	go h.awaitAcceptance(ride.ID, ride.DriverID)
@@ -249,7 +256,9 @@ func (h *Handler) AcceptRide(w http.ResponseWriter, r *http.Request) {
 	if ride.CreatedAt.After(time.Time{}) {
 		latency := time.Since(ride.CreatedAt)
 		atomic.AddInt64(&h.acceptLatencyNS, latency.Nanoseconds())
-		h.observeBucket(h.acceptBuckets, latency)
+		h.acceptBuckets.observe(latency)
+		atomic.AddInt64(&h.acceptCount, 1)
+		atomic.AddInt64(&h.acceptSumNS, latency.Nanoseconds())
 	}
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
@@ -361,6 +370,17 @@ func (h *Handler) RegisterIdentity(w http.ResponseWriter, r *http.Request) {
 	if payload.TTL != "" {
 		if parsed, err := time.ParseDuration(payload.TTL); err == nil {
 			ttl = parsed
+		}
+	}
+	if h.auth.signupSecret != "" {
+		secret := r.Header.Get("X-Signup-Secret")
+		if secret == "" {
+			respondError(w, http.StatusUnauthorized, "missing signup secret")
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(h.auth.signupSecret)) != 1 {
+			respondError(w, http.StatusForbidden, "invalid signup secret")
+			return
 		}
 	}
 	identity, err := h.auth.store.Register(dispatch.IdentityRole(payload.Role), ttl)
@@ -538,11 +558,15 @@ func (h *Handler) Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "turbodriver_drivers_stale_ratio %.4f\n", stalePct)
 	fmt.Fprintf(w, "turbodriver_match_latency_seconds_total %.6f\n", float64(atomic.LoadInt64(&h.matchLatencyNS))/1e9)
 	fmt.Fprintf(w, "turbodriver_accept_latency_seconds_total %.6f\n", float64(atomic.LoadInt64(&h.acceptLatencyNS))/1e9)
-	for le := range h.matchBuckets {
-		fmt.Fprintf(w, "turbodriver_match_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, h.matchBuckets[le])
+	fmt.Fprintf(w, "turbodriver_match_latency_seconds_sum %.6f\n", float64(atomic.LoadInt64(&h.matchSumNS))/1e9)
+	fmt.Fprintf(w, "turbodriver_match_latency_seconds_count %d\n", atomic.LoadInt64(&h.matchCount))
+	fmt.Fprintf(w, "turbodriver_accept_latency_seconds_sum %.6f\n", float64(atomic.LoadInt64(&h.acceptSumNS))/1e9)
+	fmt.Fprintf(w, "turbodriver_accept_latency_seconds_count %d\n", atomic.LoadInt64(&h.acceptCount))
+	for le, count := range h.matchBuckets.snapshot() {
+		fmt.Fprintf(w, "turbodriver_match_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, count)
 	}
-	for le := range h.acceptBuckets {
-		fmt.Fprintf(w, "turbodriver_accept_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, h.acceptBuckets[le])
+	for le, count := range h.acceptBuckets.snapshot() {
+		fmt.Fprintf(w, "turbodriver_accept_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, count)
 	}
 	fmt.Fprintf(w, "turbodriver_uptime_seconds %.0f\n", uptime)
 	fmt.Fprintf(w, "turbodriver_goroutines %d\n", runtime.NumGoroutine())
