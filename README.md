@@ -256,6 +256,13 @@ cd backend
 go run ./cmd/simulate --passenger-token=PASS_TOKEN --driver-token=DRIVER_TOKEN --driver-id=sim_driver_1 --lat=40.758 --lon=-73.9855
 ```
 
+### Smoke Test (end-to-end)
+
+Runs seed -> heartbeat -> request ride -> accept ride:
+```bash
+cd backend
+API_BASE=http://localhost:8080 WS_BASE=ws://localhost:8080 PASSENGER_TOKEN=... DRIVER_TOKEN=... go run ./cmd/smoke
+```
 ### Admin Viewer (static)
 
 `backend/static/admin/index.html` is a minimal viewer to query rides and events. Open in browser, set API base/token, and fetch ride/events.
@@ -277,6 +284,8 @@ Prometheus text endpoint at `/metrics` (API server) with counters:
 - `turbodriver_stale_drivers`
 - `turbodriver_drivers_zero_available`
 - `turbodriver_drivers_stale_ratio`
+- `turbodriver_match_latency_seconds_total`
+- `turbodriver_accept_latency_seconds_total`
 - `turbodriver_uptime_seconds`
 - `turbodriver_goroutines`
 - `turbodriver_mem_alloc_bytes`
@@ -284,14 +293,27 @@ Prometheus text endpoint at `/metrics` (API server) with counters:
 - `turbodriver_requests_total`
 - `turbodriver_request_errors_total`
 - `turbodriver_request_latency_seconds_total`
+Alert hints: `turbodriver_drivers_zero_available` > 0 or rising `turbodriver_ride_accept_timeouts` suggest driver supply/heartbeat issues.
+
+Prometheus alert ideas:
+- Drivers unavailable: `turbodriver_drivers_zero_available > 0`
+- High acceptance timeouts: `increase(turbodriver_ride_accept_timeouts[5m]) > 0`
+- Stale drivers ratio: `turbodriver_drivers_stale_ratio > 0.3`
+See `alerts/prometheus.yml` for ready-to-import rules; wire alerts to Slack/PagerDuty via your Prometheus Alertmanager config.
+
+Alertmanager example: see `alerts/alertmanager.yml` (uses `SLACK_WEBHOOK_URL` env and `#alerts` channel).
+
+Readiness: `/ready` checks DB/Redis connectivity and returns 503 if unavailable.
 
 ### HTTP & WebSocket Surface (MVP)
 
 - `GET /health` – readiness probe.
+- `POST /api/auth/signup` – issue a token for a role (`driver`/`passenger`/`admin`) without admin auth (pilot convenience).
 - `POST /api/drivers/{driverID}/location` – driver GPS heartbeat (2–5s). Body: `{"latitude":..., "longitude":..., "accuracy":optional, "timestamp":optional_ms}`. Marks driver available unless on a ride; broadcasts to ride subscribers.
-- `POST /api/rides` – passenger ride request. Body: `{"passengerId":"p1","pickupLat":..., "pickupLong":...}`. Matches nearest available driver within 3km, sets status `assigned`, and broadcasts on the ride channel.
+- `POST /api/rides` – passenger ride request. Body: `{"passengerId":"p1","pickupLat":..., "pickupLong":..., "idempotencyKey":optional}`. Matches nearest available driver within 3km, sets status `assigned`, and broadcasts on the ride channel. When `idempotencyKey` is provided, repeated requests return the same ride.
+  - Idempotency keys are cached in-memory and persisted to Postgres (TTL) when available.
 - `GET /api/rides/{rideID}` – fetch ride snapshot.
-- `POST /api/rides/{rideID}/accept` – driver accepts ride. Body: `{"driverId":"d1"}`. Moves ride to `accepted`.
+- `POST /api/rides/{rideID}/accept` – driver accepts ride. Body: `{"driverId":"d1"}`. Moves ride to `accepted`. Driver heartbeat must be fresh (within `DRIVER_TTL`).
 - `POST /api/rides/{rideID}/cancel` – cancel ride (passenger/admin flow). Frees driver.
 - `POST /api/rides/{rideID}/complete` – mark ride complete. Frees driver.
 - `GET /ws/rides/{rideID}` – subscribe to ride + driver updates (server pushes JSON frames).

@@ -1,22 +1,22 @@
 package main
 
 import (
-    "context"
-    "log"
-    "net/http"
-    "os"
-    "time"
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"time"
 
-    "github.com/go-chi/chi/v5"
-    "github.com/go-chi/chi/v5/middleware"
-    "github.com/go-chi/cors"
-    "github.com/redis/go-redis/v9"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+	"github.com/redis/go-redis/v9"
 
-    "turbodriver/internal/api"
-    "turbodriver/internal/auth"
-    "turbodriver/internal/dispatch"
-    "turbodriver/internal/geo"
-    "turbodriver/internal/storage"
+	"turbodriver/internal/api"
+	"turbodriver/internal/auth"
+	"turbodriver/internal/dispatch"
+	"turbodriver/internal/geo"
+	"turbodriver/internal/storage"
 )
 
 func main() {
@@ -37,6 +37,17 @@ func main() {
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := store.HealthCheck(ctx); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ready"))
+	})
 
 	api.AttachRoutes(r, store, hub, authStore, identityDB, authTTL, eventLogger, rideLister)
 
@@ -75,6 +86,9 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		idDB    *storage.IdentityStore
 		events  storage.EventLogger
 		rideLst dispatch.RideLister
+		idemDB  *storage.IdempotencyStore
+		dbPing  func(context.Context) error
+		redisFn func(context.Context) error
 	)
 
 	if dbURL != "" {
@@ -83,17 +97,23 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			log.Printf("database connection failed, falling back to in-memory: %v", err)
 		} else if err := storage.EnsureSchema(ctx, pool); err != nil {
 			log.Printf("schema init failed, falling back to in-memory: %v", err)
-			} else {
-				log.Printf("using PostgreSQL persistence")
-				pg := storage.NewPostgres(pool)
-				persist = pg
-				events = pg
-				rideLst = pg
+		} else {
+			log.Printf("using PostgreSQL persistence")
+			pg := storage.NewPostgres(pool)
+			persist = pg
+			events = pg
+			rideLst = pg
 			idDB = storage.NewIdentityStore(pool)
 			if err := idDB.EnsureSchema(ctx); err != nil {
 				log.Printf("identity schema init failed: %v", err)
 				idDB = nil
 			}
+			idemDB = storage.NewIdempotencyStore(pool, 30*time.Minute)
+			if err := idemDB.EnsureSchema(ctx); err != nil {
+				log.Printf("idempotency schema init failed: %v", err)
+				idemDB = nil
+			}
+			dbPing = pool.Ping
 		}
 	}
 
@@ -106,13 +126,14 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 			} else {
 				log.Printf("using Redis geo index")
 				geoLoc = redisGeoLocator{idx: geo.NewIndex(client)}
+				redisFn = func(c context.Context) error { return client.Ping(c).Err() }
 			}
 		} else {
 			log.Printf("redis URL parse error, geo fallback to in-memory: %v", err)
 		}
 	}
 
-	if authEnabled == "memory" && authMem == nil {
+	if authEnabled == "memory" {
 		authMem = auth.NewInMemoryStore()
 		log.Printf("auth: in-memory token issuance enabled")
 		if idDB != nil {
@@ -120,7 +141,12 @@ func initStore() (*dispatch.Store, *auth.InMemoryStore, *storage.IdentityStore, 
 		}
 	}
 
-	return dispatch.NewStoreWithDeps(persist, geoLoc), authMem, idDB, authTTL, events, rideLst
+	store := dispatch.NewStoreWithDeps(persist, geoLoc)
+	if idemDB != nil {
+		store.AttachIdempotency(idemDB)
+	}
+	store.AttachHealth(dbPing, redisFn)
+	return store, authMem, idDB, authTTL, events, rideLst
 }
 
 func parseDuration(val string) time.Duration {
@@ -149,6 +175,10 @@ func startDriverPrune(store *dispatch.Store) {
 	ticker := time.NewTicker(time.Minute)
 	for range ticker.C {
 		store.PruneStaleDrivers(ttl)
+		total, available, stale := store.SnapshotDrivers(ttl)
+		if available == 0 {
+			log.Printf("warn: zero available drivers (total=%d, stale=%d)", total, stale)
+		}
 	}
 }
 

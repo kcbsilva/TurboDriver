@@ -1,0 +1,29 @@
+groups:
+  - name: turbodriver
+    rules:
+      - alert: TurboDriverZeroAvailableDrivers
+        expr: turbodriver_drivers_zero_available > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No available drivers in pool"
+          description: "turbodriver_drivers_zero_available has been > 0 for 2m. Check driver heartbeats and Redis geo."
+
+      - alert: TurboDriverAcceptanceTimeouts
+        expr: increase(turbodriver_ride_accept_timeouts[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ride acceptance timeouts detected"
+          description: "Accept timeouts in last 5m. Investigate driver availability/latency."
+
+      - alert: TurboDriverHighStaleRatio
+        expr: turbodriver_drivers_stale_ratio > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High stale driver ratio"
+          description: "More than 30% of drivers have stale heartbeats."

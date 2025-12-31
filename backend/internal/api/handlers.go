@@ -83,16 +83,21 @@ type Handler struct {
 	events dispatch.EventLogger
 	db     dispatch.RideLister
 
-	eventsLogged  int64
-	rideStarts    int64
-	rideAccepts   int64
-	rideCancels   int64
-	rideCompletes int64
-	startTime     time.Time
-	reqCount      int64
-	reqErrors     int64
-	reqLatencyNS  int64
-	staleTTL      time.Duration
+	eventsLogged    int64
+	rideStarts      int64
+	rideAccepts     int64
+	rideCancels     int64
+	rideCompletes   int64
+	acceptTimeouts  int64
+	startTime       time.Time
+	reqCount        int64
+	reqErrors       int64
+	reqLatencyNS    int64
+	staleTTL        time.Duration
+	matchLatencyNS  int64
+	acceptLatencyNS int64
+	matchBuckets    map[float64]int64
+	acceptBuckets   map[float64]int64
 }
 
 type driverLocationPayload struct {
@@ -141,6 +146,7 @@ type rideRequestPayload struct {
 	PassengerID string  `json:"passengerId"`
 	PickupLat   float64 `json:"pickupLat"`
 	PickupLong  float64 `json:"pickupLong"`
+	Idempotency string  `json:"idempotencyKey,omitempty"`
 }
 
 func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +161,14 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Idempotency: reuse existing ride when key matches
+	if payload.Idempotency != "" {
+		if ride, ok := h.store.LookupIdempotent(payload.Idempotency); ok {
+			respondJSON(w, http.StatusOK, ride)
+			return
+		}
+	}
+
 	passengerID := payload.PassengerID
 	if identity.Role == dispatch.RolePassenger {
 		passengerID = identity.ID
@@ -164,7 +178,7 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 		Latitude:  payload.PickupLat,
 		Longitude: payload.PickupLong,
 		At:        time.Now(),
-	})
+	}, payload.Idempotency)
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -177,6 +191,13 @@ func (h *Handler) RequestRide(w http.ResponseWriter, r *http.Request) {
 		"statusTo":    ride.Status,
 	})
 	h.rideStarts++
+	if ride.CreatedAt.After(time.Time{}) {
+		latency := time.Since(ride.CreatedAt)
+		if ride.Status == dispatch.RideAssigned {
+			atomic.AddInt64(&h.matchLatencyNS, latency.Nanoseconds())
+			h.observeBucket(h.matchBuckets, latency)
+		}
+	}
 	go h.awaitAcceptance(ride.ID, ride.DriverID)
 	respondJSON(w, http.StatusAccepted, ride)
 }
@@ -209,6 +230,10 @@ func (h *Handler) AcceptRide(w http.ResponseWriter, r *http.Request) {
 	if !matchIdentity(w, r, enforce, payload.DriverID) {
 		return
 	}
+	if enforce && !h.store.DriverIsFresh(payload.DriverID, h.staleTTL) {
+		respondError(w, http.StatusBadRequest, "driver heartbeat too old")
+		return
+	}
 	ride, prevStatus, err := h.store.AcceptRide(rideID, payload.DriverID)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
@@ -220,6 +245,12 @@ func (h *Handler) AcceptRide(w http.ResponseWriter, r *http.Request) {
 		"statusTo":   ride.Status,
 	})
 	h.rideAccepts++
+	// acceptance latency: from assigned to accepted
+	if ride.CreatedAt.After(time.Time{}) {
+		latency := time.Since(ride.CreatedAt)
+		atomic.AddInt64(&h.acceptLatencyNS, latency.Nanoseconds())
+		h.observeBucket(h.acceptBuckets, latency)
+	}
 	h.hub.PublishRideUpdate(ride)
 	respondJSON(w, http.StatusOK, ride)
 }
@@ -278,6 +309,9 @@ func (h *Handler) awaitAcceptance(rideID, driverID string) {
 
 	ride, changed, err := h.store.ReassignIfUnaccepted(rideID, driverID)
 	if err != nil || !changed {
+		if err == nil && !changed {
+			h.acceptTimeouts++
+		}
 		return
 	}
 	h.logRideEvent(context.Background(), ride, "ride_reassigned", map[string]any{
@@ -313,6 +347,39 @@ func (h *Handler) RegisterIdentity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireRole(w, r, true, dispatch.RoleAdmin) {
+		return
+	}
+	var payload struct {
+		Role string `json:"role"`
+		TTL  string `json:"ttl,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	ttl := h.auth.ttl
+	if payload.TTL != "" {
+		if parsed, err := time.ParseDuration(payload.TTL); err == nil {
+			ttl = parsed
+		}
+	}
+	identity, err := h.auth.store.Register(dispatch.IdentityRole(payload.Role), ttl)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.auth.db != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		h.auth.db.Save(ctx, identity, ttl)
+	}
+	respondJSON(w, http.StatusOK, identity)
+}
+
+// SignupIdentity issues a token without admin (pilot convenience).
+func (h *Handler) SignupIdentity(w http.ResponseWriter, r *http.Request) {
+	if h.auth.store == nil {
+		respondError(w, http.StatusServiceUnavailable, "auth not configured")
 		return
 	}
 	var payload struct {
@@ -453,6 +520,7 @@ func (h *Handler) Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "turbodriver_ride_accepts %d\n", h.rideAccepts)
 	fmt.Fprintf(w, "turbodriver_ride_cancels %d\n", h.rideCancels)
 	fmt.Fprintf(w, "turbodriver_ride_completes %d\n", h.rideCompletes)
+	fmt.Fprintf(w, "turbodriver_ride_accept_timeouts %d\n", h.acceptTimeouts)
 	uptime := time.Since(h.startTime).Seconds()
 	fmt.Fprintf(w, "turbodriver_prunes %d\n", h.store.PruneCount())
 	total, available, stale := h.store.SnapshotDrivers(h.staleTTL)
@@ -468,6 +536,14 @@ func (h *Handler) Metrics(w http.ResponseWriter, r *http.Request) {
 		stalePct = float64(stale) / float64(total)
 	}
 	fmt.Fprintf(w, "turbodriver_drivers_stale_ratio %.4f\n", stalePct)
+	fmt.Fprintf(w, "turbodriver_match_latency_seconds_total %.6f\n", float64(atomic.LoadInt64(&h.matchLatencyNS))/1e9)
+	fmt.Fprintf(w, "turbodriver_accept_latency_seconds_total %.6f\n", float64(atomic.LoadInt64(&h.acceptLatencyNS))/1e9)
+	for le := range h.matchBuckets {
+		fmt.Fprintf(w, "turbodriver_match_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, h.matchBuckets[le])
+	}
+	for le := range h.acceptBuckets {
+		fmt.Fprintf(w, "turbodriver_accept_latency_seconds_bucket{le=\"%.0f\"} %d\n", le, h.acceptBuckets[le])
+	}
 	fmt.Fprintf(w, "turbodriver_uptime_seconds %.0f\n", uptime)
 	fmt.Fprintf(w, "turbodriver_goroutines %d\n", runtime.NumGoroutine())
 	var m runtime.MemStats
@@ -502,6 +578,16 @@ type statusRecorder struct {
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
+}
+
+func (h *Handler) observeBucket(buckets map[float64]int64, d time.Duration) {
+	secs := d.Seconds()
+	for le := range buckets {
+		if secs <= le {
+			v := buckets[le] + 1
+			buckets[le] = v
+		}
+	}
 }
 
 func (h *Handler) logRideEvent(ctx context.Context, ride dispatch.Ride, evtType string, payload map[string]any) {

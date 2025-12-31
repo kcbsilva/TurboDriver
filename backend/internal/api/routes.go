@@ -18,23 +18,27 @@ import (
 func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authStore *auth.InMemoryStore, identityDB *storage.IdentityStore, defaultTTL time.Duration, eventLogger dispatch.EventLogger, rideLister dispatch.RideLister) {
 	authCfg := newAuthConfig(authStore, identityDB, defaultTTL)
 	handler := &Handler{
-		store:     store,
-		hub:       hub,
-		auth:      authCfg,
-		events:    eventLogger,
-		db:        rideLister,
-		startTime: time.Now(),
-		staleTTL:  parseDurationEnv("DRIVER_TTL", "5m"),
+		store:         store,
+		hub:           hub,
+		auth:          authCfg,
+		events:        eventLogger,
+		db:            rideLister,
+		startTime:     time.Now(),
+		staleTTL:      parseDurationEnv("DRIVER_TTL", "5m"),
+		matchBuckets:  map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0},
+		acceptBuckets: map[float64]int64{1: 0, 3: 0, 10: 0, 30: 0},
 	}
 
 	r.Use(handler.metricsMiddleware)
 	r.Use(middleware.RequestID)
-	r.Use(middleware.Logger)
+	r.Use(JSONLogger)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
 	})
+
+	r.Post("/api/auth/signup", handler.SignupIdentity)
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(authCfg.middleware)

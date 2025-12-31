@@ -78,6 +78,11 @@ type RideTransaction interface {
 	UpdateRideWithEvent(ctx context.Context, ride Ride, event RideEvent, driver *DriverState) error
 }
 
+type IdempotencyStore interface {
+	Remember(ctx context.Context, key, rideID string) error
+	Lookup(ctx context.Context, key string) (string, bool, error)
+}
+
 // RideLister provides ride history for identities.
 type RideLister interface {
 	ListRidesByPassenger(ctx context.Context, passengerID string, limit, offset int) ([]Ride, error)

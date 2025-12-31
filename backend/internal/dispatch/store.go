@@ -31,6 +31,10 @@ type Store struct {
 	pruneCount  int64
 	lastPruned  int64
 	staleCount  int64
+	idemCache   *idemCache
+	idemDB      IdempotencyStore
+	dbPing      func(context.Context) error
+	redisPing   func(context.Context) error
 }
 
 func NewStore() *Store {
@@ -55,6 +59,7 @@ func NewStoreWithDeps(p Persistence, g GeoLocator) *Store {
 		persistence: p,
 		geo:         g,
 		tx:          toRideTx(p),
+		idemCache:   newIdemCache(),
 	}
 }
 
@@ -63,6 +68,17 @@ func toRideTx(p Persistence) RideTransaction {
 		return tx
 	}
 	return nil
+}
+
+// AttachIdempotency connects a persistent idempotency store.
+func (s *Store) AttachIdempotency(store IdempotencyStore) {
+	s.idemDB = store
+}
+
+// AttachHealth sets ping functions used by readiness checks.
+func (s *Store) AttachHealth(db func(context.Context) error, redis func(context.Context) error) {
+	s.dbPing = db
+	s.redisPing = redis
 }
 
 // UpdateDriverLocation sets the latest known driver position and marks them available.
@@ -98,9 +114,15 @@ func (s *Store) UpdateDriverLocation(id string, loc Coordinate) (DriverState, er
 }
 
 // CreateRide creates a ride and assigns the nearest available driver within a fixed radius.
-func (s *Store) CreateRide(passengerID string, pickup Coordinate) (Ride, error) {
+func (s *Store) CreateRide(passengerID string, pickup Coordinate, idemKey string) (Ride, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if idemKey != "" {
+		if ride, ok := s.lookupRideByKeyLocked(idemKey); ok {
+			return ride, nil
+		}
+	}
 
 	nearestID, dist := s.findNearestDriverLocked(pickup, 3)
 	if nearestID == "" {
@@ -130,9 +152,39 @@ func (s *Store) CreateRide(passengerID string, pickup Coordinate) (Ride, error) 
 		"driverId": driver.ID,
 		"distKm":   dist,
 	})
+	s.idemCache.Remember(idemKey, ride.ID)
+	if s.idemDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		_ = s.idemDB.Remember(ctx, idemKey, ride.ID)
+	}
 
 	_ = dist // retained for future logging/metrics
 	return ride, nil
+}
+
+// LookupIdempotent returns a ride if the idempotency key was seen.
+func (s *Store) LookupIdempotent(key string) (Ride, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lookupRideByKeyLocked(key)
+}
+
+func (s *Store) lookupRideByKeyLocked(key string) (Ride, bool) {
+	if key == "" {
+		return Ride{}, false
+	}
+	if id, ok := s.idemCache.Lookup(key); ok {
+		return s.GetRide(id)
+	}
+	if s.idemDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		if id, ok, err := s.idemDB.Lookup(ctx, key); err == nil && ok {
+			return s.GetRide(id)
+		}
+	}
+	return Ride{}, false
 }
 
 func (s *Store) GetRide(id string) (Ride, bool) {
@@ -373,6 +425,32 @@ func (s *Store) SnapshotDrivers(ttl time.Duration) (int, int, int) {
 		}
 	}
 	return total, available, stale
+}
+
+// DriverIsFresh checks if driver heartbeat is within ttl.
+func (s *Store) DriverIsFresh(driverID string, ttl time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	drv, ok := s.drivers[driverID]
+	if !ok {
+		return false
+	}
+	return time.Since(drv.UpdatedAt) <= ttl
+}
+
+// HealthCheck checks db/redis ping if configured.
+func (s *Store) HealthCheck(ctx context.Context) error {
+	if s.dbPing != nil {
+		if err := s.dbPing(ctx); err != nil {
+			return err
+		}
+	}
+	if s.redisPing != nil {
+		if err := s.redisPing(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReassignIfUnaccepted frees the current driver and attempts to reassign if still unaccepted.
