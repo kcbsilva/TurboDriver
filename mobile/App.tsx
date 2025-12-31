@@ -9,6 +9,7 @@ import {
   StyleSheet,
   useColorScheme,
   Pressable,
+  Image,
 } from 'react-native';
 import {darkTheme, lightTheme} from './theme';
 
@@ -17,6 +18,11 @@ const defaultWs = 'ws://localhost:8080';
 
 type ThemePref = 'system' | 'light' | 'dark';
 type WebSocketMessageEvent = {data: string};
+type RatingResponse = {
+  average: number;
+  count: number;
+  data: {stars: number; comment?: string; createdAt?: string}[];
+};
 
 export default function App() {
   const systemScheme = useColorScheme();
@@ -30,10 +36,24 @@ export default function App() {
   const [wsBase, setWsBase] = useState(defaultWs);
   const [passToken, setPassToken] = useState('');
   const [driverToken, setDriverToken] = useState('');
+  const [driverID, setDriverID] = useState('mobile_driver');
+  const [passengerID, setPassengerID] = useState('mobile_passenger');
   const [rideId, setRideId] = useState('');
   const [log, setLog] = useState<string[]>([]);
   const [ratingStars, setRatingStars] = useState(5);
   const [ratingComment, setRatingComment] = useState('');
+  const [profileName, setProfileName] = useState('Taylor Driver');
+  const [rideCount, setRideCount] = useState('0');
+  const [coverUrl, setCoverUrl] = useState('');
+  const [avatarUrl, setAvatarUrl] = useState('');
+  const [starFilter, setStarFilter] = useState<number | null>(null);
+  const [driverRatings, setDriverRatings] = useState<RatingResponse | null>(
+    null,
+  );
+  const [passengerRatings, setPassengerRatings] =
+    useState<RatingResponse | null>(null);
+  const [driverSummary, setDriverSummary] = useState<any>(null);
+  const [passengerSummary, setPassengerSummary] = useState<any>(null);
   const [locationCode, setLocationCode] = useState('');
   const [licenseNumber, setLicenseNumber] = useState('');
   const [licenseCountry, setLicenseCountry] = useState('');
@@ -108,7 +128,7 @@ export default function App() {
   const sendHeartbeat = async () => {
     try {
       const res = await fetch(
-        `${apiBase}/api/drivers/mobile_driver/location`,
+        `${apiBase}/api/drivers/${driverID}/location`,
         {
           method: 'POST',
           headers: apiHeaders(driverToken),
@@ -143,11 +163,10 @@ export default function App() {
       logLine('driver token required');
       return;
     }
-    if (!locationCode || !licenseNumber) {
+    if (!locationCode || !licenseNumber || !driverID) {
       logLine('location and license required');
       return;
     }
-    const driverID = 'mobile_driver';
     const challengeSequence = shuffle(['up', 'down', 'left', 'right']);
     const photos = [
       {angle: 'front', photoUrl: frontUrl},
@@ -200,7 +219,6 @@ export default function App() {
   };
 
   const fetchApplication = async () => {
-    const driverID = 'mobile_driver';
     try {
       const res = await fetch(`${apiBase}/api/drivers/${driverID}/application`, {
         headers: apiHeaders(driverToken),
@@ -251,6 +269,81 @@ export default function App() {
     }
   };
 
+  const fetchRatings = async (role: 'driver' | 'passenger') => {
+    const id = role === 'driver' ? driverID : passengerID;
+    const token = role === 'driver' ? driverToken : passToken;
+    if (!id) {
+      logLine(`${role} id required`);
+      return;
+    }
+    if (!token) {
+      logLine(`${role} token required`);
+      return;
+    }
+    const path =
+      role === 'driver'
+        ? `/api/drivers/${id}/ratings`
+        : `/api/passengers/${id}/ratings`;
+    try {
+      const res = await fetch(`${apiBase}${path}`, {
+        headers: apiHeaders(token),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+      if (role === 'driver') {
+        setDriverRatings(json as RatingResponse);
+      } else {
+        setPassengerRatings(json as RatingResponse);
+      }
+      logLine(`fetched ${role} ratings (avg ${(json.average || 0).toFixed(2)})`);
+    } catch (err: any) {
+      logLine(`ratings fetch failed: ${err.message}`);
+    }
+  };
+
+  const fetchSummary = async (role: 'driver' | 'passenger') => {
+    const id = role === 'driver' ? driverID : passengerID;
+    const token = role === 'driver' ? driverToken : passToken;
+    if (!id) {
+      logLine(`${role} id required`);
+      return;
+    }
+    if (!token) {
+      logLine(`${role} token required`);
+      return;
+    }
+    const path =
+      role === 'driver'
+        ? `/api/drivers/${id}/summary`
+        : `/api/passengers/${id}/summary`;
+    try {
+      const res = await fetch(`${apiBase}${path}`, {headers: apiHeaders(token)});
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+      if (role === 'driver') {
+        setDriverSummary(json);
+        setDriverRatings({
+          average: json.ratingAverage || 0,
+          count: json.ratingCount || 0,
+          data: json.ratings || [],
+        });
+        if (json.rideCount != null) setRideCount(String(json.rideCount));
+      } else {
+        setPassengerSummary(json);
+        setPassengerRatings({
+          average: json.ratingAverage || 0,
+          count: json.ratingCount || 0,
+          data: json.ratings || [],
+        });
+        if (json.profile?.fullName) setProfileName(json.profile.fullName);
+        if (json.rideCount != null) setRideCount(String(json.rideCount));
+      }
+      logLine(`fetched ${role} summary`);
+    } catch (err: any) {
+      logLine(`summary fetch failed: ${err.message}`);
+    }
+  };
+
   return (
     <SafeAreaView style={[styles.screen]}>
       <ScrollView contentContainerStyle={styles.container}>
@@ -283,6 +376,18 @@ export default function App() {
           label="Driver Token"
           value={driverToken}
           onChangeText={setDriverToken}
+          styles={styles}
+        />
+        <LabelInput
+          label="Passenger ID"
+          value={passengerID}
+          onChangeText={setPassengerID}
+          styles={styles}
+        />
+        <LabelInput
+          label="Driver ID"
+          value={driverID}
+          onChangeText={setDriverID}
           styles={styles}
         />
         <LabelInput
@@ -415,6 +520,68 @@ export default function App() {
           <Button title="Passenger Rates" onPress={() => submitRating('passenger')} />
           <Button title="Driver Rates" onPress={() => submitRating('driver')} />
         </View>
+        <View style={styles.actions}>
+          <Button title="Get Driver Ratings" onPress={() => fetchRatings('driver')} />
+          <Button
+            title="Get Passenger Ratings"
+            onPress={() => fetchRatings('passenger')}
+          />
+        </View>
+        <View style={styles.actions}>
+          <Button title="Driver Summary" onPress={() => fetchSummary('driver')} />
+          <Button title="Passenger Summary" onPress={() => fetchSummary('passenger')} />
+        </View>
+        <Text style={[styles.heading, {marginTop: 16}]}>Profile Preview</Text>
+        <LabelInput
+          label="Full Name"
+          value={profileName}
+          onChangeText={setProfileName}
+          styles={styles}
+        />
+        <LabelInput
+          label="Ride Count"
+          value={rideCount}
+          onChangeText={setRideCount}
+          styles={styles}
+        />
+        <LabelInput
+          label="Cover Photo URL"
+          value={coverUrl}
+          onChangeText={setCoverUrl}
+          styles={styles}
+        />
+        <LabelInput
+          label="Profile Photo URL"
+          value={avatarUrl}
+          onChangeText={setAvatarUrl}
+          styles={styles}
+        />
+        <ProfileCard
+          name={profileName}
+          rides={Number(rideCount) || 0}
+          ratings={driverRatings || passengerRatings}
+          coverUrl={coverUrl}
+          avatarUrl={avatarUrl}
+          onFilter={setStarFilter}
+          activeFilter={starFilter}
+          styles={styles}
+        />
+        {driverRatings && (
+          <RatingBlock
+            title="Driver Ratings"
+            ratings={driverRatings}
+            styles={styles}
+            filter={starFilter}
+          />
+        )}
+        {passengerRatings && (
+          <RatingBlock
+            title="Passenger Ratings"
+            ratings={passengerRatings}
+            styles={styles}
+            filter={starFilter}
+          />
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -563,6 +730,118 @@ function SliderRow({
   );
 }
 
+function RatingBlock({
+  title,
+  ratings,
+  styles,
+  filter,
+}: {
+  title: string;
+  ratings: RatingResponse;
+  styles: ReturnType<typeof createStyles>;
+  filter?: number | null;
+}) {
+  const filtered =
+    filter == null
+      ? ratings.data
+      : ratings.data.filter(r => Math.round(r.stars) === filter);
+  return (
+    <View style={styles.field}>
+      <Text style={styles.heading}>{title}</Text>
+      <Text style={styles.subhead}>
+        Avg: {ratings.average.toFixed(2)} ({ratings.count})
+      </Text>
+      {filtered.slice(0, 5).map((r, idx) => (
+        <Text key={`${title}-${idx}`} style={styles.logLine}>
+          {r.stars}★ {r.comment ? `– ${r.comment}` : ''}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+function ProfileCard({
+  name,
+  rides,
+  ratings,
+  coverUrl,
+  avatarUrl,
+  onFilter,
+  activeFilter,
+  styles,
+}: {
+  name: string;
+  rides: number;
+  ratings: RatingResponse | null;
+  coverUrl: string;
+  avatarUrl: string;
+  onFilter: (v: number | null) => void;
+  activeFilter: number | null;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const avg = ratings ? ratings.average.toFixed(2) : '0.0';
+  const filters = [5, 4, 3, 2, 1];
+  return (
+    <View style={styles.profileCard}>
+      {coverUrl ? (
+        <Image source={{uri: coverUrl}} style={styles.cover} />
+      ) : (
+        <View style={[styles.cover, styles.coverPlaceholder]} />
+      )}
+      <View style={styles.avatarWrap}>
+        {avatarUrl ? (
+          <Image source={{uri: avatarUrl}} style={styles.avatar} />
+        ) : (
+          <View style={[styles.avatar, styles.coverPlaceholder]} />
+        )}
+      </View>
+      <View style={styles.profileBody}>
+        <Text style={styles.heading}>{name}</Text>
+        <View style={styles.profileStats}>
+          <Text style={styles.subhead}>⭐ {avg}</Text>
+          <Text style={styles.subhead}>{rides} rides</Text>
+        </View>
+        <View style={styles.themeButtons}>
+          <Pressable
+            style={[
+              styles.themeButton,
+              activeFilter === null && styles.themeButtonActive,
+            ]}
+            onPress={() => onFilter(null)}>
+            <Text
+              style={[
+                styles.themeButtonText,
+                activeFilter === null && styles.themeButtonTextActive,
+              ]}>
+              All
+            </Text>
+          </Pressable>
+          {filters.map(star => {
+            const active = activeFilter === star;
+            return (
+              <Pressable
+                key={star}
+                style={[
+                  styles.themeButton,
+                  active && styles.themeButtonActive,
+                ]}
+                onPress={() => onFilter(star)}>
+                <Text
+                  style={[
+                    styles.themeButtonText,
+                    active && styles.themeButtonTextActive,
+                  ]}>
+                  {star}★
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function ThemeSelector({
   pref,
   onSelect,
@@ -649,6 +928,34 @@ const createStyles = (theme: typeof lightTheme) =>
     },
     themeButtonText: {color: theme.textSecondary, fontWeight: '500'},
     themeButtonTextActive: {color: theme.accent, fontWeight: '700'},
+    profileCard: {
+      borderWidth: 1,
+      borderColor: theme.border,
+      borderRadius: 12,
+      overflow: 'hidden',
+      backgroundColor: theme.card,
+      marginTop: 12,
+    },
+    cover: {width: '100%', height: 140},
+    coverPlaceholder: {backgroundColor: theme.border},
+    avatarWrap: {
+      position: 'absolute',
+      top: 90,
+      alignSelf: 'center',
+      borderRadius: 48,
+      padding: 4,
+      backgroundColor: theme.card,
+      borderWidth: 2,
+      borderColor: theme.border,
+    },
+    avatar: {width: 88, height: 88, borderRadius: 44},
+    profileBody: {paddingTop: 60, paddingHorizontal: 16, paddingBottom: 12},
+    profileStats: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginVertical: 8,
+    },
   });
 
 function shuffle(arr: string[]) {

@@ -60,6 +60,8 @@ func AttachRoutes(r chi.Router, store *dispatch.Store, hub *dispatch.Hub, authSt
 		pr.Post("/api/rides/{rideID}/rating", handler.RateRide)
 		pr.Get("/api/drivers/{driverID}/ratings", handler.GetRatingsForDriver)
 		pr.Get("/api/passengers/{passengerID}/ratings", handler.GetRatingsForPassenger)
+		pr.Get("/api/passengers/{passengerID}/summary", handler.GetPassengerSummary)
+		pr.Get("/api/drivers/{driverID}/summary", handler.GetDriverSummary)
 	})
 
 	r.Group(func(pr chi.Router) {

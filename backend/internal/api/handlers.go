@@ -989,6 +989,90 @@ func isAdmin(r *http.Request) bool {
 	return ok && id.Role == dispatch.RoleAdmin
 }
 
+// Summaries: profile + ride counts + ratings.
+func (h *Handler) GetPassengerSummary(w http.ResponseWriter, r *http.Request) {
+	h.getSummary(w, r, dispatch.RolePassenger)
+}
+
+func (h *Handler) GetDriverSummary(w http.ResponseWriter, r *http.Request) {
+	h.getSummary(w, r, dispatch.RoleDriver)
+}
+
+func (h *Handler) getSummary(w http.ResponseWriter, r *http.Request, role dispatch.IdentityRole) {
+	if h.apps == nil || h.db == nil {
+		respondError(w, http.StatusServiceUnavailable, "summary unavailable")
+		return
+	}
+	enforce := h.auth.store != nil
+	if !requireRole(w, r, enforce, role, dispatch.RoleAdmin) {
+		return
+	}
+	var id string
+	if role == dispatch.RoleDriver {
+		id = chi.URLParam(r, "driverID")
+	} else {
+		id = chi.URLParam(r, "passengerID")
+	}
+	if !matchIdentity(w, r, enforce, id) && !(enforce && isAdmin(r)) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	var rideCount int
+	var err error
+	if role == dispatch.RoleDriver {
+		rideCount, err = h.db.CountRidesByDriver(ctx, id)
+	} else {
+		rideCount, err = h.db.CountRidesByPassenger(ctx, id)
+	}
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to count rides")
+		return
+	}
+
+	profile := map[string]any{}
+	if role == dispatch.RolePassenger {
+		if prof, ok, err := h.apps.GetPassengerProfile(ctx, id); err == nil && ok {
+			profile = profToMap(prof)
+		}
+	}
+
+	ratings, err := h.apps.GetRatingsForProfile(ctx, id)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to fetch ratings")
+		return
+	}
+	avg := 0.0
+	if len(ratings) > 0 {
+		var sum int
+		for _, rt := range ratings {
+			sum += rt.Stars
+		}
+		avg = float64(sum) / float64(len(ratings))
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"profile":       profile,
+		"rideCount":     rideCount,
+		"ratingAverage": avg,
+		"ratingCount":   len(ratings),
+		"ratings":       ratings,
+	})
+}
+
+func profToMap(p dispatch.PassengerProfile) map[string]any {
+	return map[string]any{
+		"id":           p.ID,
+		"passengerId":  p.PassengerID,
+		"fullName":     p.FullName,
+		"address":      p.Address,
+		"governmentId": p.GovernmentID,
+		"createdAt":    p.CreatedAt,
+		"updatedAt":    p.UpdatedAt,
+	}
+}
+
 func validateVehicle(v vehBody) error {
 	vt := strings.ToLower(v.Type)
 	if vt != "car" && vt != "motorcycle" && vt != "bus" {
